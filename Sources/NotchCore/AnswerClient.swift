@@ -57,9 +57,9 @@ public struct AnswerClient {
         var decoder = EventStreamDecoder()
         var sawFinish = false
         var characters = 0
-        for try await line in bytes.lines {
+        for try await byte in bytes {
             try Task.checkCancellation()
-            guard let event = try decoder.feed(line) else { continue }
+            guard let event = try decoder.feed(byte: byte) else { continue }
             if event.done {
                 guard characters > 0 else { throw AssistantError("The model returned an empty answer.") }
                 return

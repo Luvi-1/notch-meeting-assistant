@@ -35,7 +35,6 @@ final class MeetingLogicTests: XCTestCase {
         gate.consume(requestedRevision, at: start.addingTimeInterval(2))
         XCTAssertFalse(ready(20))
         gate.changed(at: start.addingTimeInterval(3))
-        // New speech received during a response remains eligible when that response finishes.
         gate.consume(requestedRevision, at: start.addingTimeInterval(4))
         XCTAssertFalse(ready(5))
         XCTAssertTrue(ready(8))
@@ -57,5 +56,23 @@ final class MeetingLogicTests: XCTestCase {
         XCTAssertTrue(OutputMode.both.showsText && OutputMode.both.usesVoice)
         XCTAssertFalse(OutputMode.voice.showsText)
         XCTAssertFalse(OutputMode.text.usesVoice)
+    }
+
+    func testByteFramingPreservesUTF8BlankLinesAndMultilineEvents() throws {
+        for newline in ["\n", "\r\n", "\r"] {
+            var decoder = EventStreamDecoder()
+            let raw = [": heartbeat", "", "data: {\"choices\":", "data: [{\"delta\":{\"content\":\"Hello 🌎\"}}]}", "", "data: [DONE]", "", ""].joined(separator: newline)
+            var events: [StreamEvent] = []
+            for byte in raw.utf8 {
+                if let event = try decoder.feed(byte: byte) { events.append(event) }
+            }
+            XCTAssertEqual(events, [StreamEvent(text: "Hello 🌎"), StreamEvent(done: true)])
+        }
+        var invalid = EventStreamDecoder()
+        _ = try invalid.feed(byte: 0xC3)
+        _ = try invalid.feed(byte: 0x28)
+        XCTAssertThrowsError(try invalid.feed(byte: 10))
+        var oversized = EventStreamDecoder()
+        XCTAssertThrowsError(try oversized.feed("data: " + String(repeating: "x", count: 262_144)))
     }
 }

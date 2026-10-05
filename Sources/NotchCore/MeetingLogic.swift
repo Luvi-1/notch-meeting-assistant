@@ -88,14 +88,38 @@ public struct StreamEvent: Equatable {
 
 public struct EventStreamDecoder {
     private var dataLines: [String] = []
+    private var eventBytes = 0
+    private var lineBytes: [UInt8] = []
+    private var afterCR = false
     public init() {}
 
-    // SSE events end at a blank line. Comment/heartbeat lines are deliberately ignored.
+    // Frame bytes ourselves so empty SSE boundaries and split UTF-8 characters survive.
+    public mutating func feed(byte: UInt8) throws -> StreamEvent? {
+        if afterCR {
+            afterCR = false
+            if byte == 10 { return nil }
+        }
+        if byte == 10 || byte == 13 {
+            afterCR = byte == 13
+            guard let line = String(bytes: lineBytes, encoding: .utf8) else {
+                throw AssistantError("The response contained invalid UTF-8.")
+            }
+            lineBytes.removeAll(keepingCapacity: true)
+            return try feed(line)
+        }
+        guard lineBytes.count < 262_144 else {
+            throw AssistantError("The response contained an oversized line.")
+        }
+        lineBytes.append(byte)
+        return nil
+    }
+
     public mutating func feed(_ line: String) throws -> StreamEvent? {
         if line.isEmpty {
             guard !dataLines.isEmpty else { return nil }
             let payload = dataLines.joined(separator: "\n")
             dataLines.removeAll(keepingCapacity: true)
+            eventBytes = 0
             if payload == "[DONE]" { return StreamEvent(done: true) }
             let chunk = try JSONDecoder().decode(Chunk.self, from: Data(payload.utf8))
             if let error = chunk.error { throw AssistantError(String(error.message.prefix(300))) }
@@ -106,10 +130,11 @@ public struct EventStreamDecoder {
         if line.hasPrefix("data:") {
             var data = String(line.dropFirst(5))
             if data.first == " " { data.removeFirst() }
-            dataLines.append(data)
-            guard dataLines.reduce(0, { $0 + $1.utf8.count }) < 262_144 else {
+            eventBytes += data.utf8.count + 1
+            guard eventBytes <= 262_144 else {
                 throw AssistantError("The response stream contained an oversized event.")
             }
+            dataLines.append(data)
         }
         return nil
     }
