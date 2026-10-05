@@ -1,0 +1,26 @@
+name: Build macOS app
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test meeting logic and response parsing
+        run: swift test
+      - name: Build and verify universal macOS app
+        run: bash scripts/build-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Notch-Meeting-Assistant
+          path: dist/Notch-Meeting-Assistant.zip
+          if-no-files-found: error
+          retention-days: 7
