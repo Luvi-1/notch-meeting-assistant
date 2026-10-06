@@ -12,6 +12,15 @@ final class MeetingModel: ObservableObject {
                settings.questionAssistance == .off || settings.questionAssistance == .detectOnly,
                answeringAutomatically { cancelAnswer() }
             if oldValue.outputMode != settings.outputMode, !settings.outputMode.usesVoice { stopVoice() }
+            if oldValue.questionAssistance != settings.questionAssistance, settings.questionAssistance == .off {
+                currentQuestion = nil
+                deferredQuestion = nil
+                presentation.dismiss()
+            }
+            if oldValue.transcription.provider != settings.transcription.provider || oldValue.transcription.baseURL != settings.transcription.baseURL {
+                transcriptionModels = []
+                transcriptionModelsStatus = ""
+            }
         }
     }
     @Published private(set) var presentation = NotchPresentation()

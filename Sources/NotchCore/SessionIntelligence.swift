@@ -517,6 +517,12 @@ public struct SelectedSessionContext: Equatable {
 }
 
 public enum SessionContextSelector {
+    private struct RankedTranscript {
+        let index: Int
+        let line: TranscriptLine
+        let score: Double
+    }
+
     /// Recent speech gets a reserved budget; earlier matching concepts and relevant notes then
     /// compete for the remainder. Every excerpt carries a stable source identifier.
     public static func select(for question: String, in session: ListeningSession,
@@ -550,12 +556,20 @@ public enum SessionContextSelector {
         let conceptSources = Set(session.moments.filter {
             [.important, .definition, .formula, .topic].contains($0.category)
         }.map(\.transcriptID))
-        let ranked = session.transcript.enumerated().map { index, line -> (Int, TranscriptLine, Double) in
+        var ranked: [RankedTranscript] = []
+        for (index, line) in session.transcript.enumerated() {
             let terms = IntelligenceText.terms(line.text)
-            let overlap = Double(queryTerms.intersection(terms).count)
-            let isConcept = conceptSources.contains(line.id)
-            return (index, line, overlap * 3 + (isConcept ? 0.6 : 0))
-        }.filter { $0.2 > 0 }.sorted { $0.2 == $1.2 ? $0.0 > $1.0 : $0.2 > $1.2 }
+            let overlap: Double = Double(queryTerms.intersection(terms).count)
+            let conceptBonus: Double = conceptSources.contains(line.id) ? 0.6 : 0.0
+            let score: Double = overlap * 3.0 + conceptBonus
+            if score > 0.0 {
+                ranked.append(RankedTranscript(index: index, line: line, score: score))
+            }
+        }
+        ranked.sort { lhs, rhs in
+            if lhs.score == rhs.score { return lhs.index > rhs.index }
+            return lhs.score > rhs.score
+        }
 
         // Reserve space for user notes even when earlier transcript passages are long.
         let matchingNotes = session.notes.filter {
@@ -572,7 +586,7 @@ public enum SessionContextSelector {
             noteIDs.append(note.id)
             used += entry.count + 1
         }
-        for (_, line, _) in ranked.prefix(12) { add(line, limit: 1_500) }
+        for candidate in ranked.prefix(12) { add(candidate.line, limit: 1_500) }
         for line in session.transcript.suffix(12).reversed() { add(line, limit: 800) }
 
         let indices = Dictionary(session.transcript.enumerated().map { ($0.element.id, $0.offset) },
