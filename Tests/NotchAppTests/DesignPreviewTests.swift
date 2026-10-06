@@ -88,7 +88,7 @@ final class DesignPreviewTests: XCTestCase {
     private func render<Content: View>(_ content: Content, size: NSSize, name: String, output: URL) async throws {
         let root = content
             .environment(\.colorScheme, .dark)
-            .environment(\.accessibilityReduceMotion, true)
+            .transaction { $0.disablesAnimations = true }
             .environment(\.locale, Locale(identifier: "en_US"))
             .environment(\.timeZone, TimeZone(identifier: "America/Los_Angeles")!)
             .frame(width: size.width, height: size.height)
@@ -98,7 +98,7 @@ final class DesignPreviewTests: XCTestCase {
         let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = .clear
+        window.backgroundColor = NSColor.clear
         window.isOpaque = false
         window.contentView = host
         window.orderFrontRegardless()
@@ -108,9 +108,9 @@ final class DesignPreviewTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
         host.displayIfNeeded()
-        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        let bitmap: NSBitmapImageRep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
         host.cacheDisplay(in: host.bounds, to: bitmap)
-        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let png: Data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
         XCTAssertGreaterThan(png.count, 250, "The rendered view should produce image data.")
         try png.write(to: output.appendingPathComponent(name + ".png"), options: .atomic)
     }
