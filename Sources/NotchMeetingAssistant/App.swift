@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var library: NSWindow?
     private var statusItem: NSStatusItem?
     private var stateObserver: AnyCancellable?
+    private var listeningObserver: AnyCancellable?
     private var screenObserver: NSObjectProtocol?
     private var sleepObserver: NSObjectProtocol?
     private var outsideClickMonitor: Any?
@@ -52,6 +53,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         addItem("Quit Notch", action: #selector(quit), to: menu, key: "q")
         item.menu = menu; statusItem = item
         stateObserver = model.objectWillChange.sink { [weak self] _ in DispatchQueue.main.async { self?.updatePanel() } }
+        // Hide the review window once capture actually starts. Reopening it while listening remains explicit.
+        listeningObserver = model.$isListening.removeDuplicates().dropFirst().sink { [weak self] listening in
+            if listening { self?.library?.orderOut(nil) }
+        }
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.updatePanel(animate: false) } }
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification,

@@ -117,8 +117,11 @@ final class AppTests: XCTestCase {
         try await render(LibraryView(model: model), size: NSSize(width: 1040, height: 730), appearance: .darkAqua, file: output.appendingPathComponent("home-dark.png"))
         model.destination = .sessions; model.selectedSessionID = session.id
         try await render(LibraryView(model: model), size: NSSize(width: 1040, height: 730), appearance: .aqua, file: output.appendingPathComponent("session.png"))
+        model.selectedSegmentID = session.segments[0].id
+        try await render(LibraryView(model: model), size: NSSize(width: 1040, height: 730), appearance: .aqua, file: output.appendingPathComponent("transcript.png"))
         model.destination = .settings
         try await render(LibraryView(model: model), size: NSSize(width: 800, height: 570), appearance: .aqua, file: output.appendingPathComponent("providers-small-window.png"))
+        try await render(LibraryView(model: model), size: NSSize(width: 800, height: 570), appearance: .darkAqua, file: output.appendingPathComponent("providers-dark.png"))
         model.cutoutWidth = 185; model.cutoutHeight = 34; model.settings.questionAssistance = .detect
         model.presentQuestion(session.questions[0], sessionID: session.id)
         try await render(NotchView(model: model), size: NSSize(width: 640, height: 126), appearance: .darkAqua, file: output.appendingPathComponent("notch-question.png"))
@@ -129,11 +132,14 @@ final class AppTests: XCTestCase {
     }
     private func render<V: View>(_ view: V, size: NSSize, appearance: NSAppearance.Name, file: URL) async throws {
         let scheme: ColorScheme = appearance == .darkAqua ? .dark : .light
+        let oldAppearance = NSApp.appearance
+        NSApp.appearance = NSAppearance(named: appearance)
+        defer { NSApp.appearance = oldAppearance }
         let root = view.environment(\.colorScheme, scheme).transaction { $0.animation = nil }.frame(width: size.width, height: size.height)
         let host = NSHostingView(rootView: root); host.frame = NSRect(origin: .zero, size: size); host.sizingOptions = []
-        let window = NSWindow(contentRect: NSRect(origin: CGPoint(x: 20, y: 20), size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(origin: CGPoint(x: 20, y: 20), size: size), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.appearance = NSAppearance(named: appearance)
-        window.contentView = host; window.orderFront(nil)
+        window.contentView = host; window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         defer { window.orderOut(nil); window.close() }
         try await Task.sleep(nanoseconds: 400_000_000)
         host.layoutSubtreeIfNeeded(); host.displayIfNeeded()
