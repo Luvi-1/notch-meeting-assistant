@@ -57,6 +57,108 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(router.httpMethod, "GET")
     }
 
+    func testGroqDefaultCompletionAndConnectionCheckUseDocumentedRoutes() throws {
+        let service = LLMService(configuration: .init(id: .groq), key: key)
+        let completion = try service.makeRequest(system: "Context", user: "Question", maxTokens: 512, stream: true)
+        XCTAssertEqual(completion.url?.absoluteString, "https://api.groq.com/openai/v1/chat/completions")
+        XCTAssertEqual(completion.value(forHTTPHeaderField: "Authorization"), "Bearer \(key)")
+        XCTAssertNil(completion.value(forHTTPHeaderField: "x-api-key"))
+        XCTAssertEqual(try json(completion)["model"] as? String, "llama-3.3-70b-versatile")
+        XCTAssertEqual(try json(completion)["max_completion_tokens"] as? Int, 512)
+        XCTAssertNil(try json(completion)["max_tokens"])
+        let validation = try service.makeValidationRequest()
+        XCTAssertEqual(validation.url?.absoluteString, "https://api.groq.com/openai/v1/models")
+        XCTAssertEqual(validation.httpMethod, "GET")
+        XCTAssertNil(validation.httpBody, "A model-list connection check must not depend on the completion model.")
+
+        let responses = ProviderConfiguration(id: .groq, model: "openai/gpt-oss-120b", apiProtocol: .responses)
+        XCTAssertEqual(try LLMService(configuration: responses, key: key).makeRequest(system: "", user: "Hi").url?.path, "/openai/v1/responses")
+    }
+
+    func testPastedGroqURLsResolveOnceForChatModelsAndSpeech() throws {
+        for root in ["", "/v1", "/openai", "/openai/v1"] {
+            for suffix in ["", "/", "/chat/completions", "/audio/transcriptions/", "/models", "/responses"] {
+                let base = "https://api.groq.com" + root + suffix
+                let service = LLMService(configuration: .init(id: .groq, baseURL: base), key: key)
+                XCTAssertEqual(try service.makeRequest(system: "", user: "Hi").url?.absoluteString,
+                               "https://api.groq.com/openai/v1/chat/completions", base)
+                XCTAssertEqual(try service.makeValidationRequest().url?.absoluteString,
+                               "https://api.groq.com/openai/v1/models", base)
+                let speech = HTTPTranscriptionProvider(configuration: .init(provider: .groq, baseURL: base), key: key)
+                XCTAssertEqual(try speech.makeRequest(wavData: wav).url?.absoluteString,
+                               "https://api.groq.com/openai/v1/audio/transcriptions", base)
+            }
+        }
+    }
+
+    func testGroqURLRepairNeverRewritesUnsafeOrDifferentOrigins() throws {
+        for base in ["http://api.groq.com/openai/v1", "https://api.groq.com.evil.example/openai/v1",
+                     "https://api.openai.com/v1", "http://127.0.0.1:8080/v1", "https://api.groq.com:444/openai/v1",
+                     "https://user:secret@api.groq.com/openai/v1", "https://api.groq.com/openai/v1?key=secret",
+                     "https://api.groq.com/openai/v1#secret", "https://api.groq.com/private/secret"] {
+            let config = ProviderConfiguration(id: .groq, baseURL: base)
+            XCTAssertThrowsError(try LLMService(configuration: config, key: key).makeRequest(system: "", user: "Hi"), base) { error in
+                XCTAssertFalse(error.localizedDescription.contains(self.key))
+                XCTAssertFalse(error.localizedDescription.contains("user:secret"))
+                XCTAssertFalse(error.localizedDescription.contains("private/secret"))
+            }
+            let transcription = TranscriptionConfiguration(provider: .groq, baseURL: base)
+            XCTAssertThrowsError(try HTTPTranscriptionProvider(configuration: transcription, key: key).makeRequest(wavData: wav), base)
+        }
+        for style in [LLMAPIProtocol.anthropicMessages, .gemini] {
+            let config = ProviderConfiguration(id: .groq, apiProtocol: style)
+            XCTAssertThrowsError(try LLMService(configuration: config, key: key).makeValidationRequest())
+            XCTAssertThrowsError(try LLMService(configuration: config, key: key).makeRequest(system: "", user: "Hi"))
+        }
+    }
+
+    func testChangingSpeechProviderDropsOldModelAndEndpointButKeepsLanguage() {
+        let custom = TranscriptionConfiguration(provider: .custom, model: "custom-speech-model",
+                                                baseURL: "http://127.0.0.1:8080/v1", language: "hi", autoDetectLanguage: false)
+        let groq = custom.selectingProvider(.groq)
+        XCTAssertEqual(groq.model, "")
+        XCTAssertEqual(groq.baseURL, "")
+        XCTAssertEqual(groq.resolvedModel, "whisper-large-v3-turbo")
+        XCTAssertEqual(groq.resolvedBaseURL, "https://api.groq.com/openai/v1")
+        XCTAssertEqual(groq.language, "hi")
+        XCTAssertFalse(groq.autoDetectLanguage)
+        XCTAssertEqual(custom.selectingProvider(.custom), custom, "Selecting the same provider must preserve its current configuration.")
+        XCTAssertEqual(groq.selectingProvider(.openAI).resolvedModel, "whisper-1")
+        XCTAssertEqual(groq.selectingProvider(.localWhisper).resolvedBaseURL, "http://127.0.0.1:8080/v1")
+    }
+
+    func testGroqRejectsSpeechModelsForAnswersAndForeignModelsForSpeech() throws {
+        for model in ["whisper-large-v3-turbo", "whisper-1", "gpt-4o-transcribe"] {
+            XCTAssertThrowsError(try LLMService(configuration: .init(id: .groq, model: model), key: key).makeRequest(system: "", user: "Hi"))
+        }
+        for model in ["whisper-1", "gpt-4o-transcribe", "llama-3.3-70b-versatile"] {
+            let config = TranscriptionConfiguration(provider: .groq, model: model)
+            XCTAssertThrowsError(try HTTPTranscriptionProvider(configuration: config, key: key).makeRequest(wavData: wav))
+        }
+        // New model IDs remain possible; discovery and provider access decide availability.
+        XCTAssertNoThrow(try LLMService(configuration: .init(id: .groq, model: "future-text-model"), key: key).makeRequest(system: "", user: "Hi"))
+        XCTAssertNoThrow(try HTTPTranscriptionProvider(configuration: .init(provider: .groq, model: "future-speech-model"), key: key).makeRequest(wavData: wav))
+    }
+
+    func testGroq404DiagnosticsIdentifyTheOperationWithoutEchoingSecrets() throws {
+        let service = LLMService(configuration: .init(id: .groq, model: "private-model-id"), key: key)
+        let operations: [(URLRequest, String)] = [
+            (try service.makeValidationRequest(), "does not send a completion model"),
+            (try service.makeRequest(system: "private context", user: "private question"), "Models for each task"),
+            (try HTTPTranscriptionProvider(configuration: .init(provider: .groq), key: key).makeRequest(wavData: wav), "Settings → Transcription")
+        ]
+        for (request, explanation) in operations {
+            let response = try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 404, httpVersion: nil, headerFields: nil))
+            XCTAssertThrowsError(try ProviderHTTP.check(response, provider: "Groq", request: request)) { error in
+                XCTAssertTrue(error.localizedDescription.contains(explanation))
+                XCTAssertTrue(error.localizedDescription.contains(request.url!.path))
+                for sensitive in [self.key, "private-model-id", "private context", "private question"] {
+                    XCTAssertFalse(error.localizedDescription.contains(sensitive))
+                }
+            }
+        }
+    }
+
     func testUnsafeEndpointsAndInvalidInputAreRejected() throws {
         for endpoint in ["http://example.com/v1", "file:///tmp/file", "https://user:pass@example.com/v1",
                          "https://example.com/v1?key=secret", "https://example.com/v1#secret",
@@ -119,7 +221,7 @@ final class ProviderTests: XCTestCase {
     func testModelDiscoveryFiltersUnsupportedModels() throws {
         let gemini = bytes(#"{"models":[{"name":"models/gemini-text","displayName":"Gemini text","supportedGenerationMethods":["generateContent"]},{"name":"models/embedding","supportedGenerationMethods":["embedContent"]}]}"#)
         XCTAssertEqual(try LLMService.decodeModels(gemini, provider: .gemini), [.init(id: "gemini-text", name: "Gemini text")])
-        let groq = bytes(#"{"data":[{"id":"llama-text"},{"id":"whisper-large-v3"},{"id":"llama-guard"}]}"#)
+        let groq = bytes(#"{"data":[{"id":"llama-text","active":true},{"id":"old-text","active":false},{"id":"whisper-large-v3"},{"id":"llama-guard"}]}"#)
         XCTAssertEqual(try LLMService.decodeModels(groq, provider: .groq).map(\.id), ["llama-text"])
         let code = bytes(#"{"data":[{"id":"claude-model","endpoint":"https://opencode.ai/zen/v1/messages"}]}"#)
         XCTAssertEqual(try LLMService.decodeModels(code, provider: .openCode).first?.apiProtocol, .anthropicMessages)

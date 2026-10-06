@@ -42,4 +42,56 @@ final class SettingsMigrationTests: XCTestCase {
         XCTAssertNil(object["apiKey"])
         XCTAssertNil(object["keys"])
     }
+
+    func testSavedGroqSpeechRepairsOpenAIModelAndHiddenEndpoint() throws {
+        var value = UserSettings()
+        value.transcription = TranscriptionConfiguration(provider: .groq, model: "whisper-1",
+                                                         baseURL: "https://api.openai.com/v1", language: "hi", autoDetectLanguage: false)
+        let restored = try JSONDecoder().decode(UserSettings.self, from: JSONEncoder().encode(value))
+        XCTAssertEqual(restored.transcription.provider, .groq)
+        XCTAssertEqual(restored.transcription.resolvedBaseURL, "https://api.groq.com/openai/v1")
+        XCTAssertEqual(restored.transcription.resolvedModel, "whisper-large-v3-turbo")
+        XCTAssertEqual(restored.transcription.language, "hi")
+        XCTAssertFalse(restored.transcription.autoDetectLanguage)
+
+        value.transcription = TranscriptionConfiguration(provider: .openAI, model: "whisper-large-v3",
+                                                         baseURL: "https://api.groq.com/openai/v1/audio/transcriptions")
+        let openAI = try JSONDecoder().decode(UserSettings.self, from: JSONEncoder().encode(value))
+        XCTAssertEqual(openAI.transcription.resolvedModel, "whisper-1")
+        XCTAssertEqual(openAI.transcription.resolvedBaseURL, "https://api.openai.com/v1")
+    }
+
+    func testGroqConnectionMigrationKeepsModelRoutingAndEnabledState() throws {
+        var value = UserSettings()
+        let index = try XCTUnwrap(value.providers.firstIndex(where: { $0.id == .groq }))
+        value.providers[index] = ProviderConfiguration(id: .groq, baseURL: "https://api.groq.com/openai/v1/chat/completions",
+                                                       model: "my-selected-model", enabled: true, apiProtocol: .anthropicMessages)
+        value.taskModels[AITask.liveQuestion.rawValue] = ModelSelection(provider: .groq, model: "my-task-model")
+        let restored = try JSONDecoder().decode(UserSettings.self, from: JSONEncoder().encode(value))
+        let groq = try XCTUnwrap(restored.providers.first(where: { $0.id == .groq }))
+        XCTAssertEqual(groq.baseURL, "https://api.groq.com/openai/v1")
+        XCTAssertEqual(groq.apiProtocol, .chatCompletions)
+        XCTAssertEqual(groq.model, "my-selected-model")
+        XCTAssertTrue(groq.enabled)
+        XCTAssertEqual(restored.taskModels, value.taskModels)
+        let again = try JSONDecoder().decode(UserSettings.self, from: JSONEncoder().encode(restored))
+        XCTAssertEqual(again.providers, restored.providers)
+        XCTAssertEqual(again.transcription, restored.transcription)
+    }
+
+    func testMigrationPreservesCustomEndpointsAndDoesNotUpgradeUnsafeGroqURL() throws {
+        var value = UserSettings()
+        let custom = try XCTUnwrap(value.providers.firstIndex(where: { $0.id == .custom }))
+        value.providers[custom] = ProviderConfiguration(id: .custom, baseURL: "http://127.0.0.1:8080/v1",
+                                                        model: "local-model", enabled: true, apiProtocol: .responses)
+        value.transcription = TranscriptionConfiguration(provider: .custom, model: "local-whisper",
+                                                         baseURL: "http://127.0.0.1:8081/v1", language: "en", autoDetectLanguage: false)
+        let groq = try XCTUnwrap(value.providers.firstIndex(where: { $0.id == .groq }))
+        value.providers[groq].baseURL = "http://api.groq.com/openai/v1"
+        let restored = try JSONDecoder().decode(UserSettings.self, from: JSONEncoder().encode(value))
+        XCTAssertEqual(restored.providers[custom], value.providers[custom])
+        XCTAssertEqual(restored.transcription, value.transcription)
+        XCTAssertEqual(restored.providers[groq].baseURL, value.providers[groq].baseURL)
+        XCTAssertThrowsError(try LLMService(configuration: restored.providers[groq], key: "fixture-key").makeRequest(system: "", user: "Hi"))
+    }
 }

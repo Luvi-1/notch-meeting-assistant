@@ -53,6 +53,23 @@ public struct ProviderConfiguration: Codable, Equatable, Identifiable, Sendable 
     public static var defaults: [ProviderConfiguration] { AIProviderID.allCases.map { .init(id: $0) } }
     public static func defaultConfiguration(for id: AIProviderID) -> ProviderConfiguration { .init(id: id) }
 
+    /// Repair only known Groq connection mistakes; retain model choices and unrelated providers.
+    public func repairedSavedConfiguration() -> Self {
+        guard id == .groq else { return self }
+        var value = self
+        if let canonical = try? ProviderHTTP.groqBaseURL(baseURL) { value.baseURL = canonical }
+        if apiProtocol == .anthropicMessages || apiProtocol == .gemini { value.apiProtocol = .chatCompletions }
+        return value
+    }
+
+    func requestBaseURL() throws -> String {
+        guard id == .groq else { return baseURL }
+        guard apiProtocol == .chatCompletions || apiProtocol == .responses else {
+            throw AssistantError("Groq uses OpenAI-compatible chat or Responses. Reset the Groq connection in Settings → AI Providers.")
+        }
+        return try ProviderHTTP.groqBaseURL(baseURL)
+    }
+
     private static func baseURL(for id: AIProviderID) -> String {
         switch id {
         case .openAI: return "https://api.openai.com/v1"
@@ -142,6 +159,9 @@ public struct LLMService: LLMProvider, Sendable {
     public func makeRequest(system: String, user: String, maxTokens: Int = 2_048,
                             stream: Bool = false) throws -> URLRequest {
         let model = try ProviderHTTP.model(configuration.model)
+        if configuration.id == .groq && (model.lowercased().contains("whisper") || model.lowercased().contains("transcrib")) {
+            throw AssistantError("A speech model cannot answer questions. Choose a Groq language model in AI Providers or Models for each task; choose Whisper under Transcription.")
+        }
         guard (1...32_768).contains(maxTokens) else { throw AssistantError("Choose an output budget from 1 to 32,768 tokens.") }
         guard !user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AssistantError("There is no content to send to the model.") }
         guard system.utf8.count + user.utf8.count <= 600_000 else { throw AssistantError("The selected context is too large. Narrow the question or use fewer passages.") }
@@ -173,7 +193,7 @@ public struct LLMService: LLMProvider, Sendable {
                        "contents": [["role": "user", "parts": [["text": user]]]],
                        "generationConfig": ["maxOutputTokens": maxTokens]]
         }
-        var request = try ProviderHTTP.request(baseURL: configuration.baseURL, endpoint: endpoint,
+        var request = try ProviderHTTP.request(baseURL: configuration.requestBaseURL(), endpoint: endpoint,
                                                key: key, apiProtocol: configuration.apiProtocol)
         if configuration.apiProtocol == .gemini && stream {
             var parts = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
@@ -197,7 +217,7 @@ public struct LLMService: LLMProvider, Sendable {
                        onDelta: @escaping @Sendable (String) async -> Void) async throws {
         let request = try makeRequest(system: system, user: user, maxTokens: maxTokens, stream: true)
         let (bytes, response) = try await ProviderHTTP.session.bytes(for: request)
-        try ProviderHTTP.check(response, provider: configuration.displayName)
+        try ProviderHTTP.check(response, provider: configuration.displayName, request: request)
         guard let http = response as? HTTPURLResponse,
               http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/event-stream") == true else {
             throw AssistantError("The provider did not return an event stream. Check its API protocol in Settings.")
@@ -231,7 +251,7 @@ public struct LLMService: LLMProvider, Sendable {
     }
 
     public func getModels() async throws -> [ProviderModel] {
-        var request = try ProviderHTTP.request(baseURL: configuration.baseURL, endpoint: "models", key: key,
+        var request = try ProviderHTTP.request(baseURL: configuration.requestBaseURL(), endpoint: "models", key: key,
                                                apiProtocol: configuration.apiProtocol)
         request.httpMethod = "GET"
         var all: [ProviderModel] = []
@@ -267,7 +287,7 @@ public struct LLMService: LLMProvider, Sendable {
     }
 
     func makeValidationRequest() throws -> URLRequest {
-        var request = try ProviderHTTP.request(baseURL: configuration.baseURL,
+        var request = try ProviderHTTP.request(baseURL: configuration.requestBaseURL(),
                                                endpoint: configuration.id == .openRouter ? "key" : "models",
                                                key: key, apiProtocol: configuration.apiProtocol)
         request.httpMethod = "GET"
@@ -280,6 +300,7 @@ public struct LLMService: LLMProvider, Sendable {
             throw AssistantError("This endpoint did not return a model list. Enter a model ID manually.")
         }
         return entries.compactMap { entry in
+            if provider == .groq, entry["active"] as? Bool == false { return nil }
             guard let rawID = (entry["id"] ?? entry["name"]) as? String else { return nil }
             let id = provider == .gemini && rawID.hasPrefix("models/") ? String(rawID.dropFirst(7)) : rawID
             guard (try? ProviderHTTP.model(id)) != nil else { return nil }
@@ -366,6 +387,45 @@ public struct TranscriptionConfiguration: Codable, Equatable, Sendable {
         self.baseURL = baseURL
         self.language = language
         self.autoDetectLanguage = autoDetectLanguage
+    }
+
+    /// Provider changes must not reuse another provider's model or credential destination.
+    public func selectingProvider(_ provider: TranscriptionProviderID) -> Self {
+        guard provider != self.provider else { return self }
+        return Self(provider: provider, language: language, autoDetectLanguage: autoDetectLanguage)
+    }
+
+    /// Older settings kept the previous provider's hidden fields when the speech provider changed.
+    /// Repair identifiable built-in leftovers; unknown endpoints remain visible as validation errors.
+    public func repairedSavedConfiguration() -> Self {
+        var value = self
+        let cleanModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let savedURL = try? ProviderHTTP.baseURL(baseURL)
+        switch provider {
+        case .groq:
+            if cleanModel == "whisper-1" || cleanModel.hasPrefix("gpt-") && cleanModel.contains("transcrib") {
+                value.model = ""
+            }
+            if let canonical = try? ProviderHTTP.groqBaseURL(baseURL) {
+                // An empty field deliberately follows the provider default.
+                if !baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { value.baseURL = canonical }
+            } else if let savedURL, savedURL.host?.lowercased() == "api.openai.com",
+                      savedURL.port == nil || savedURL.port == 443,
+                      ["", "/", "/v1", "/v1/", "/v1/audio/transcriptions"].contains(savedURL.path) {
+                value.baseURL = ""
+            }
+        case .openAI:
+            if cleanModel == "whisper-large-v3" || cleanModel == "whisper-large-v3-turbo" { value.model = "" }
+            if let savedURL, savedURL.host?.lowercased() == "api.groq.com",
+               (try? ProviderHTTP.groqBaseURL(baseURL)) != nil { value.baseURL = "" }
+        default: break
+        }
+        return value
+    }
+
+    func requestBaseURL() throws -> String {
+        if provider == .groq { return try ProviderHTTP.groqBaseURL(resolvedBaseURL) }
+        return resolvedBaseURL
     }
     public var resolvedBaseURL: String {
         if !baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return baseURL }
@@ -528,7 +588,14 @@ public struct HTTPTranscriptionProvider: TranscriptionProvider, Sendable {
         }
         guard boundary.range(of: "^[A-Za-z0-9-]{1,80}$", options: .regularExpression) != nil else { throw AssistantError("Invalid upload boundary.") }
         let model = try ProviderHTTP.model(configuration.resolvedModel)
-        var request = try ProviderHTTP.request(baseURL: configuration.resolvedBaseURL, endpoint: "audio/transcriptions",
+        if configuration.provider == .groq {
+            let lower = model.lowercased()
+            if lower == "whisper-1" || lower.hasPrefix("gpt-") || lower.hasPrefix("llama")
+                || lower.hasPrefix("qwen") || lower.hasPrefix("gemma") || lower.hasPrefix("openai/") {
+                throw AssistantError("Choose a Groq speech model such as whisper-large-v3-turbo in Settings → Transcription. OpenAI speech IDs and language models cannot transcribe on Groq.")
+            }
+        }
+        var request = try ProviderHTTP.request(baseURL: configuration.requestBaseURL(), endpoint: "audio/transcriptions",
                                                key: key, apiProtocol: .chatCompletions)
         var body = Data()
         func field(_ name: String, _ value: String) {
@@ -582,13 +649,14 @@ public struct HTTPTranscriptionProvider: TranscriptionProvider, Sendable {
 
     public func getModels() async throws -> [ProviderModel] {
         try checkConfiguration()
-        var request = try ProviderHTTP.request(baseURL: configuration.resolvedBaseURL, endpoint: "models",
+        var request = try ProviderHTTP.request(baseURL: configuration.requestBaseURL(), endpoint: "models",
                                                key: key, apiProtocol: .chatCompletions)
         request.httpMethod = "GET"
         let data = try await ProviderHTTP.data(for: request, provider: configuration.provider.displayName)
         let object = try ProviderHTTP.object(data)
         guard let models = object["data"] as? [[String: Any]] else { throw AssistantError("This server does not list models. Enter the installed model ID manually.") }
         return models.compactMap { item in
+            if configuration.provider == .groq, item["active"] as? Bool == false { return nil }
             guard let id = item["id"] as? String, (try? ProviderHTTP.model(id)) != nil else { return nil }
             if configuration.provider == .groq || configuration.provider == .openAI {
                 guard id.contains("whisper") || id.contains("transcrib") else { return nil }
@@ -626,6 +694,8 @@ public struct HTTPTranscriptionProvider: TranscriptionProvider, Sendable {
 }
 
 enum ProviderHTTP {
+    static let groqAPIBaseURL = "https://api.groq.com/openai/v1"
+
     static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 60
@@ -653,6 +723,25 @@ enum ProviderHTTP {
             throw AssistantError("Use an HTTPS base URL without credentials or query parameters. HTTP is allowed only for localhost.")
         }
         return url
+    }
+
+    /// Accept common pasted Groq URLs without duplicating an operation path. Never rewrite a host,
+    /// downgrade transport, retain query credentials, or silently repoint a custom server.
+    static func groqBaseURL(_ value: String) throws -> String {
+        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return groqAPIBaseURL }
+        let url = try baseURL(value)
+        guard url.scheme?.lowercased() == "https", url.host?.lowercased() == "api.groq.com",
+              url.port == nil || url.port == 443 else {
+            throw AssistantError("Groq uses https://api.groq.com/openai/v1. Reset the Groq connection in Settings; use Custom for another server.")
+        }
+        var path = url.path
+        while path.hasSuffix("/") { path.removeLast() }
+        let roots = ["", "/v1", "/openai", "/openai/v1"]
+        let operations = ["/chat/completions", "/audio/transcriptions", "/models", "/responses"]
+        guard roots.contains(path) || roots.contains(where: { root in operations.contains(where: { path == root + $0 }) }) else {
+            throw AssistantError("The Groq base URL must be https://api.groq.com/openai/v1. Reset the connection in Settings; Notch adds the request path automatically.")
+        }
+        return groqAPIBaseURL
     }
 
     static func model(_ value: String) throws -> String {
@@ -693,7 +782,7 @@ enum ProviderHTTP {
         return request
     }
 
-    static func check(_ response: URLResponse, provider: String) throws {
+    static func check(_ response: URLResponse, provider: String, request: URLRequest? = nil) throws {
         guard let http = response as? HTTPURLResponse else { throw AssistantError("The provider returned an invalid response.") }
         guard (200..<300).contains(http.statusCode) else {
             let detail: String
@@ -702,19 +791,36 @@ enum ProviderHTTP {
             case 400, 422: detail = "Check the model ID, API protocol, and request settings."
             case 401, 403: detail = "Check the API key and model access."
             case 402: detail = "Check the provider account's credit or spending limit."
-            case 404: detail = "Check the base URL, model ID, and supported API protocol."
+            case 404:
+                if request?.url?.host?.lowercased() == "api.groq.com" {
+                    switch request?.url?.path {
+                    case "/openai/v1/models":
+                        detail = "Groq's model-list endpoint was not found. Reset the Groq connection in Settings → AI Providers. This connection check does not send a completion model."
+                    case "/openai/v1/audio/transcriptions":
+                        detail = "Groq could not find the speech model or transcription endpoint. In Settings → Transcription, choose the Groq default or fetch available speech models."
+                    case "/openai/v1/chat/completions", "/openai/v1/responses":
+                        detail = "Groq could not find the language model or generation endpoint. Fetch models in Settings → AI Providers → Groq and choose an available model. Also check Groq model overrides under Models for each task."
+                    default: detail = "Reset the Groq connection to https://api.groq.com/openai/v1 in Settings. Notch adds the request path automatically."
+                    }
+                } else { detail = "Check the base URL, model ID, and supported API protocol." }
             case 413: detail = "Use a smaller audio chunk or less context."
             case 429: detail = "Check credit and rate limits, then retry."
             default: detail = "The service is unavailable. Retry when it is reachable."
             }
             // Do not echo a server body: custom providers may include credentials or transcript content in errors.
-            throw AssistantError("\(provider) returned HTTP \(http.statusCode). \(detail)")
+            var operation = ""
+            if request?.url?.host?.lowercased() == "api.groq.com", let path = request?.url?.path,
+               ["/openai/v1/models", "/openai/v1/audio/transcriptions", "/openai/v1/chat/completions", "/openai/v1/responses"].contains(path),
+               let method = request?.httpMethod, ["GET", "POST"].contains(method) {
+                operation = " (\(method) \(path))"
+            }
+            throw AssistantError("\(provider) returned HTTP \(http.statusCode)\(operation). \(detail)")
         }
     }
 
     static func data(for request: URLRequest, provider: String) async throws -> Data {
         let (bytes, response) = try await session.bytes(for: request)
-        try check(response, provider: provider)
+        try check(response, provider: provider, request: request)
         var data = Data()
         for try await byte in bytes {
             try Task.checkCancellation()

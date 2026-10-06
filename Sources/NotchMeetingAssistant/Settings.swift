@@ -77,9 +77,11 @@ struct UserSettings: Codable {
         for candidate in ProviderConfiguration.defaults where !providers.contains(where: { $0.id == candidate.id }) {
             providers.append(candidate)
         }
+        providers = providers.map { $0.repairedSavedConfiguration() }
         taskModels = try values.decodeIfPresent([String: ModelSelection].self, forKey: .taskModels) ?? [:]
         transcription = try values.decodeIfPresent(TranscriptionConfiguration.self, forKey: .transcription)
             ?? TranscriptionConfiguration()
+        transcription = transcription.repairedSavedConfiguration()
     }
 
     static func load() -> Self {
