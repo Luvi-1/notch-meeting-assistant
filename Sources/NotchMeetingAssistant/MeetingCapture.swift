@@ -7,12 +7,12 @@ import NotchCore
 
 @MainActor
 final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
-    var onText: ((UUID, String, String) -> Void)?
     var onSegment: ((UUID, String, String, Date) -> Void)?
     var onFailure: ((String) -> Void)?
     var onLevel: ((Double) -> Void)?
     private var stream: SCStream?
     private var microphone: AVAudioEngine?
+    private var microphoneObserver: NSObjectProtocol?
     private var generation = UUID()
     private var running = false
     private var draining = false
@@ -39,9 +39,9 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             guard permission == .authorized else { throw AssistantError("Allow Speech Recognition in System Settings → Privacy & Security.") }
         } else {
             let config = options.transcription
-            _ = try config.endpoint()
-            if config.resolvedKind != .localWhisper, config.resolvedKind != .custom,
-               try APIKeyStore.load(config.kind.keyID).isEmpty { throw AssistantError("Add the transcription provider's API key in Settings.") }
+            let key = config.kind.keyID.isEmpty ? "" : try APIKeyStore.load(config.kind.keyID)
+            // Validate configuration without making a paid request or capturing audio.
+            _ = try WhisperProvider(configuration: config, key: key).makeRequest(wav: PCMChunk.wav(samples: [0]))
         }
         if options.audioSource.usesMicrophone {
             let granted = await AVCaptureDevice.requestAccess(for: .audio)
@@ -59,9 +59,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 let filter: SCContentFilter
                 if options.applicationID.isEmpty { filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: []) }
                 else {
-                    guard let app = content.applications.first(where: { $0.bundleIdentifier == options.applicationID }) else {
-                        throw AssistantError("The selected audio app is not running.")
-                    }
+                    guard let app = content.applications.first(where: { $0.bundleIdentifier == options.applicationID }) else { throw AssistantError("The selected audio app is not running.") }
                     filter = SCContentFilter(display: display, including: [app], exceptingWindows: [])
                 }
                 let config = SCStreamConfiguration()
@@ -73,33 +71,34 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 try candidate.addStreamOutput(self, type: .screen, sampleHandlerQueue: .main)
                 stream = candidate
             }
-            running = true; suppressed = false
-            try restartRecognition()
+            running = true; suppressed = false; try restartRecognition()
             if options.audioSource.usesMicrophone {
-                let engine = AVAudioEngine()
-                let node = engine.inputNode
+                let engine = AVAudioEngine(), node = engine.inputNode
                 let format = node.outputFormat(forBus: 0)
                 guard format.sampleRate > 0, format.channelCount > 0 else { throw AssistantError("The microphone has no usable audio format.") }
                 node.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
-                    // AVAudioEngine reuses its buffers after the tap returns; transfer an owned copy.
+                    // AVAudioEngine reuses tap buffers, so only an owned copy crosses the actor boundary.
                     guard let copy = Self.copy(buffer) else { return }
                     Task { @MainActor in
                         guard let self, self.generation == token, self.running, !self.suppressed else { return }
                         self.append(copy, source: "Room")
                     }
                 }
-                microphone = engine
-                engine.prepare(); try engine.start()
+                microphone = engine; engine.prepare(); try engine.start()
+                microphoneObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self, weak engine] _ in
+                    Task { @MainActor in
+                        guard let self, let engine, self.running, self.generation == token, !engine.isRunning else { return }
+                        self.onFailure?("The microphone changed or disconnected. Listening stopped; start again with the current input device.")
+                    }
+                }
             }
             if let stream { try await stream.startCapture() }
             try check(token)
-        } catch {
-            await stop(flush: false)
-            throw error
-        }
+        } catch { await stop(flush: false); throw error }
     }
     func stop(flush: Bool = true) async {
         generation = UUID(); running = false; draining = flush
+        if let microphoneObserver { NotificationCenter.default.removeObserver(microphoneObserver); self.microphoneObserver = nil }
         microphone?.inputNode.removeTap(onBus: 0); microphone?.stop(); microphone = nil
         let old = stream; stream = nil
         if let old { try? await old.stopCapture() }
@@ -113,9 +112,8 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         suppressed = value
         if value { channels.values.forEach { $0.pause() }; onLevel?(0) }
     }
-    func restartRecognition() throws {
-        channels.values.forEach { $0.stop() }; channels.removeAll()
-        guard running else { return }
+    private func restartRecognition() throws {
+        channels.values.forEach { $0.stop() }; channels.removeAll(); guard running else { return }
         var sources: [String] = []
         if options.audioSource.usesMicrophone { sources.append("Room") }
         if options.audioSource.usesSystem { sources.append("Device") }
@@ -123,17 +121,14 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             let channel: AudioChannel
             if options.transcription.resolvedKind == .apple {
                 let apple = AppleSpeechChannel(source: source)
-                try apple.start(locale: options.transcription.automaticLanguage ? options.locale : options.transcription.language,
-                                onDeviceOnly: options.onDeviceOnly)
+                try apple.start(locale: options.transcription.automaticLanguage ? options.locale : options.transcription.language, onDeviceOnly: options.onDeviceOnly)
                 channel = apple
             } else {
                 let keyID = options.transcription.kind.keyID
-                let key = keyID.isEmpty ? "" : try APIKeyStore.load(keyID)
-                channel = WhisperSpeechChannel(source: source, configuration: options.transcription, key: key)
+                channel = WhisperSpeechChannel(source: source, configuration: options.transcription, key: keyID.isEmpty ? "" : try APIKeyStore.load(keyID))
             }
             channel.onText = { [weak self] id, source, text, time in
-                guard let self, self.running || self.draining else { return }
-                self.onText?(id, source, text); self.onSegment?(id, source, text, time)
+                guard let self, self.running || self.draining else { return }; self.onSegment?(id, source, text, time)
             }
             channel.onFailure = { [weak self] message in self?.onFailure?(message) }
             channels[source] = channel
@@ -144,14 +139,11 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             var sum: Float = 0
             for index in stride(from: 0, to: Int(buffer.frameLength), by: 8) { sum += samples[index] * samples[index] }
             let rms = sqrt(sum / Float(max(1, Int(buffer.frameLength) / 8)))
-            onLevel?(min(1, Double(rms) * 12))
+            onLevel?(rms.isFinite ? min(1, Double(rms) * 12) : 0)
         }
-        do { try channels[source]?.append(buffer) }
-        catch { onFailure?(error.localizedDescription) }
+        do { try channels[source]?.append(buffer) } catch { onFailure?(error.localizedDescription) }
     }
-    private func check(_ token: UUID) throws {
-        guard generation == token, !Task.isCancelled else { throw CancellationError() }
-    }
+    private func check(_ token: UUID) throws { guard generation == token, !Task.isCancelled else { throw CancellationError() } }
     nonisolated private static func copy(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else { return nil }
         copy.frameLength = buffer.frameLength
@@ -167,9 +159,11 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard type == .audio, CMSampleBufferDataIsReady(sample) else { return }
         Task { @MainActor [weak self] in
             guard let self, self.stream === stream, self.running, !self.suppressed,
-                  let description = CMSampleBufferGetFormatDescription(sample),
-                  let format = AVAudioFormat(cmAudioFormatDescription: description),
-                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(CMSampleBufferGetNumSamples(sample))) else { return }
+                  let description = CMSampleBufferGetFormatDescription(sample) else { return }
+            let format = AVAudioFormat(cmAudioFormatDescription: description)
+            let count = CMSampleBufferGetNumSamples(sample)
+            guard count > 0, count <= 480_000,
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)) else { return }
             buffer.frameLength = buffer.frameCapacity
             let result = CMSampleBufferCopyPCMDataIntoAudioBufferList(sample, at: 0, frameCount: Int32(buffer.frameLength), into: buffer.mutableAudioBufferList)
             guard result == noErr else { self.onFailure?("Could not decode captured system audio (\(result))."); return }
@@ -178,8 +172,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
         Task { @MainActor [weak self] in
-            guard let self, self.stream === stream, self.running else { return }
-            self.onFailure?("Audio capture stopped: \(error.localizedDescription)")
+            guard let self, self.stream === stream, self.running else { return }; self.onFailure?("Audio capture stopped: \(error.localizedDescription)")
         }
     }
 }
@@ -193,7 +186,6 @@ private protocol AudioChannel: AnyObject {
     func finish() async
     func stop()
 }
-
 @MainActor
 private final class AppleSpeechChannel: AudioChannel {
     var onText: ((UUID, String, String, Date) -> Void)?
@@ -212,20 +204,16 @@ private final class AppleSpeechChannel: AudioChannel {
     private var failures = 0
     init(source: String) { self.source = source }
     func start(locale: String, onDeviceOnly: Bool) throws {
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)), recognizer.isAvailable else {
-            throw AssistantError("Apple Speech is unavailable for \(locale). Choose a language or another transcription provider.")
-        }
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: locale)), recognizer.isAvailable else { throw AssistantError("Apple Speech is unavailable for \(locale). Choose a language or another transcription provider.") }
         guard !onDeviceOnly || recognizer.supportsOnDeviceRecognition else { throw AssistantError("On-device speech is unavailable for this language.") }
-        self.recognizer = recognizer; self.onDeviceOnly = onDeviceOnly
-        active = true; beginSegment()
+        self.recognizer = recognizer; self.onDeviceOnly = onDeviceOnly; active = true; beginSegment()
     }
     func append(_ buffer: AVAudioPCMBuffer) throws { if active && !finishing { request?.append(buffer) } }
     func pause() {}
     func finish() async {
         finishing = true; rotation?.invalidate(); request?.endAudio()
         for _ in 0..<20 {
-            if finalized || !active { break }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            if finalized || !active { break }; try? await Task.sleep(nanoseconds: 100_000_000)
         }
         stop()
     }
@@ -235,7 +223,7 @@ private final class AppleSpeechChannel: AudioChannel {
     }
     private func beginSegment() {
         guard active, !finishing, let recognizer else { return }
-        segment = UUID(); let id = segment; let time = Date()
+        segment = UUID(); let id = segment, time = Date()
         finalized = false; rotation?.invalidate(); request?.endAudio(); task?.cancel()
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true; request.requiresOnDeviceRecognition = onDeviceOnly
@@ -267,7 +255,6 @@ private final class AppleSpeechChannel: AudioChannel {
         }
     }
 }
-
 @MainActor
 private final class WhisperSpeechChannel: AudioChannel {
     var onText: ((UUID, String, String, Date) -> Void)?
@@ -298,8 +285,7 @@ private final class WhisperSpeechChannel: AudioChannel {
         guard let converter else { throw AssistantError("Could not convert the microphone audio format.") }
         let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * 16_000 / buffer.format.sampleRate) + 64)
         guard let converted = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else { throw AssistantError("Could not allocate an audio buffer.") }
-        var supplied = false
-        var error: NSError?
+        var supplied = false; var error: NSError?
         converter.convert(to: converted, error: &error) { _, status in
             if supplied { status.pointee = .noDataNow; return nil }
             supplied = true; status.pointee = .haveData; return buffer
@@ -315,18 +301,21 @@ private final class WhisperSpeechChannel: AudioChannel {
         if samples.count >= chunkFrames || (freshFrames >= 16_000 && quietFrames >= 9_600) { flush(final: false) }
     }
     func pause() { flush(final: true) }
-    func finish() async { active = false; flush(final: true); await worker?.value }
+    func finish() async {
+        active = false; flush(final: true)
+        let deadline = Date().addingTimeInterval(45)
+        while worker != nil, Date() < deadline, !Task.isCancelled { try? await Task.sleep(nanoseconds: 100_000_000) }
+        if worker != nil {
+            failed = true; worker?.cancel()
+            onFailure?("Final audio could not finish transcribing within 45 seconds. The saved transcript may be missing its last part.")
+        }
+    }
     func stop() { active = false; worker?.cancel(); worker = nil; samples.removeAll(); queue.removeAll() }
     private func flush(final: Bool) {
         guard !failed, freshFrames > 0, !samples.isEmpty else { return }
-        // Do not bill/upload chunks containing only silence.
         let energy = samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count)
         if energy >= 0.00001 {
-            guard queue.count < 8 else {
-                failed = true
-                onFailure?("Transcription could not keep up. Listening stopped; audio after the last transcript may be missing.")
-                return
-            }
+            guard queue.count < 8 else { failed = true; onFailure?("Transcription could not keep up. Listening stopped; audio after the last transcript may be missing."); return }
             number += 1; queue.append(Chunk(samples: samples, time: chunkStart, number: number))
         }
         let overlap = final ? 0 : min(5_600, samples.count)
@@ -342,10 +331,12 @@ private final class WhisperSpeechChannel: AudioChannel {
                 let result = try await provider.transcribe(wav: PCMChunk.wav(samples: chunk.samples), context: previous)
                 try Task.checkCancellation()
                 if result.parts.contains(where: { $0.speaker != nil }) {
-                    for part in result.parts where !part.text.isEmpty {
-                        // Diarization identities are scoped to each uploaded clip, never guessed across clips.
+                    for (position, part) in result.parts.enumerated() where !part.text.isEmpty {
+                        let clean = position == 0 ? PCMChunk.removingOverlap(previous: previous, next: part.text) : part.text
+                        guard !clean.isEmpty else { continue }
+                        // Diarization IDs are scoped to each clip. Never guess identities across uploads.
                         let label = part.speaker.map { "\(source) · Speaker \($0) (clip \(chunk.number))" } ?? source
-                        onText?(UUID(), label, part.text, chunk.time.addingTimeInterval(part.start))
+                        onText?(UUID(), label, clean, chunk.time.addingTimeInterval(part.start))
                     }
                 } else {
                     let clean = PCMChunk.removingOverlap(previous: previous, next: result.text)
@@ -353,8 +344,7 @@ private final class WhisperSpeechChannel: AudioChannel {
                 }
                 previous = result.text
             } catch {
-                if Task.isCancelled { return }
-                failed = true
+                if Task.isCancelled { return }; failed = true
                 onFailure?("Transcription stopped: \(error.localizedDescription) Audio after the last transcript may be missing.")
             }
         }

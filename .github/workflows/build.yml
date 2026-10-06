@@ -14,13 +14,30 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Test meeting logic and response parsing
+        with:
+          persist-credentials: false
+      - name: Test sessions, providers, audio formats and notch behavior
         run: swift test
       - name: Build and verify universal macOS app
         run: bash scripts/build-app.sh
+      - name: Launch native UI and render library/notch states
+        env:
+          NOTCH_SMOKE_OUTPUT: ${{ github.workspace }}/dist/previews
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          subprocess.run(['dist/Notch.app/Contents/MacOS/NotchMeetingAssistant', '--smoke-check'], env=os.environ.copy(), check=True, timeout=60)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: Notch-Meeting-Assistant
           path: dist/Notch-Meeting-Assistant.zip
           if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Native-UI-Previews
+          path: dist/previews/*.png
+          if-no-files-found: ignore
           retention-days: 7
