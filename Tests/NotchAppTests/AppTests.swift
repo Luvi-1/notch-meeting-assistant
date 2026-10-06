@@ -129,17 +129,17 @@ final class AppTests: XCTestCase {
     }
     private func render<V: View>(_ view: V, size: NSSize, appearance: NSAppearance.Name, file: URL) async throws {
         let scheme: ColorScheme = appearance == .darkAqua ? .dark : .light
-        let root = view.environment(\.colorScheme, scheme).environment(\.accessibilityReduceMotion, true).frame(width: size.width, height: size.height)
+        let root = view.environment(\.colorScheme, scheme).transaction { $0.animation = nil }.frame(width: size.width, height: size.height)
         let host = NSHostingView(rootView: root); host.frame = NSRect(origin: .zero, size: size); host.sizingOptions = []
         let window = NSWindow(contentRect: NSRect(origin: CGPoint(x: 20, y: 20), size: size), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.appearance = NSAppearance(named: appearance)
         window.contentView = host; window.orderFront(nil)
         defer { window.orderOut(nil); window.close() }
-        try await Task.sleep(nanoseconds: 200_000_000)
+        try await Task.sleep(nanoseconds: 400_000_000)
         host.layoutSubtreeIfNeeded(); host.displayIfNeeded()
-        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        let bitmap: NSBitmapImageRep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
         host.cacheDisplay(in: host.bounds, to: bitmap)
-        let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let data: Data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
         XCTAssertGreaterThan(data.count, 500)
         try data.write(to: file)
     }
