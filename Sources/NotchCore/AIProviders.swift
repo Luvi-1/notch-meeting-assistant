@@ -407,6 +407,100 @@ public struct TranscriptionResult: Codable, Equatable, Sendable {
     }
 }
 
+public struct TranscriptionPassage: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let source: String
+    public let text: String
+    /// Provider timestamps are relative to this clip, never inferred as a person's identity across clips.
+    public let start: Double?
+    public let end: Double?
+}
+
+public enum TranscriptionPassages {
+    /// Only complete, temporally valid segmentation replaces the full transcript. Voice aliases are clip-scoped.
+    public static func make(from result: TranscriptionResult, source: String, chunkID: UUID,
+                            clipIndex: Int, clipDuration: Double, previousText: String = "",
+                            overlappingPrefixDuration: Double = 0) -> [TranscriptionPassage] {
+        let cleanSource = String(source.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(40))
+        let sourceLabel = cleanSource.isEmpty ? "Audio" : cleanSource
+        let overlap = overlappingPrefixDuration.isFinite ? max(0, min(0.25, overlappingPrefixDuration)) : 0
+        func fallback() -> [TranscriptionPassage] {
+            let text = TranscriptOverlap.removingRepeatedPrefix(result.text, previous: previousText,
+                                                                overlappingAudio: overlap > 0, maximumWords: 4)
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+            return [.init(id: chunkID, source: sourceLabel, text: text, start: nil, end: nil)]
+        }
+        let segments = result.segments
+        guard !segments.isEmpty, segments.count <= 512, clipDuration.isFinite, clipDuration > 0,
+              segments.contains(where: { speakerToken($0.speaker) != nil }) else { return fallback() }
+        var previousStart = -Double.infinity
+        for segment in segments {
+            guard segment.start.isFinite, segment.end.isFinite, segment.start >= 0,
+                  segment.start >= previousStart, segment.end >= segment.start,
+                  segment.end <= clipDuration + 0.05,
+                  !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fallback() }
+            previousStart = segment.start
+        }
+        // Preserve punctuation and word boundaries: incomplete metadata must never swallow part of the transcript.
+        let joined = segments.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }.joined(separator: " ")
+        guard canonical(joined) == canonical(result.text) else { return fallback() }
+
+        var aliases: [String: String] = [:]
+        let labels = segments.map { segment -> String in
+            guard let token = speakerToken(segment.speaker) else { return sourceLabel }
+            if aliases[token] == nil {
+                let count = aliases.count
+                aliases[token] = count < 26 ? String(UnicodeScalar(65 + count)!) : String(count + 1)
+            }
+            // Never display a provider token as a named person or reuse its apparent identity in another clip.
+            return "\(sourceLabel) · Voice \(aliases[token]!) · clip \(max(1, clipIndex))"
+        }
+        let skip = overlappingSegmentCount(segments, previous: previousText, duration: overlap)
+        return segments.enumerated().compactMap { index, segment in
+            guard index >= skip else { return nil }
+            return .init(id: passageID(chunkID: chunkID, index: index), source: labels[index], text: segment.text,
+                         start: min(segment.start, clipDuration), end: min(segment.end, clipDuration))
+        }
+    }
+
+    private static func canonical(_ text: String) -> String {
+        text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    private static func speakerToken(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !token.isEmpty && token.count <= 128 ? token : nil
+    }
+
+    private static func passageID(chunkID: UUID, index: Int) -> UUID {
+        // Stable for this clip and source segment; emitting or filtering a neighboring segment does not change it.
+        var value = chunkID.uuid
+        let ordinal = UInt32(index + 1)
+        value.12 ^= UInt8(truncatingIfNeeded: ordinal >> 24)
+        value.13 ^= UInt8(truncatingIfNeeded: ordinal >> 16)
+        value.14 ^= UInt8(truncatingIfNeeded: ordinal >> 8)
+        value.15 ^= UInt8(truncatingIfNeeded: ordinal)
+        return UUID(uuid: value)
+    }
+
+    private static func overlappingSegmentCount(_ segments: [TranscriptionSegment], previous: String,
+                                                 duration: Double) -> Int {
+        guard duration > 0, segments.count > 1 else { return 0 }
+        let prior = TranscriptStore.normalized(previous).split(separator: " ").map(String.init)
+        var prefix: [String] = []
+        var matched = 0
+        for (index, segment) in segments.dropLast().enumerated() {
+            // Without word timestamps, never cut a segment that extends beyond the actual overlapping audio.
+            guard segment.end <= duration + 0.01 else { break }
+            prefix += TranscriptStore.normalized(segment.text).split(separator: " ").map(String.init)
+            guard !prefix.isEmpty, prefix.count <= 4 else { break }
+            if prior.count >= prefix.count, Array(prior.suffix(prefix.count)) == prefix { matched = index + 1 }
+        }
+        return matched
+    }
+}
+
 public protocol TranscriptionProvider {
     func transcribe(wavData: Data) async throws -> TranscriptionResult
     /// Each input is a complete WAV chunk. Returned timestamps are relative to that chunk.
@@ -441,7 +535,8 @@ public struct HTTPTranscriptionProvider: TranscriptionProvider, Sendable {
             body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8))
         }
         field("model", model)
-        let diarize = configuration.provider == .openAI && model.contains("diarize")
+        let diarize = configuration.provider == .openAI
+            && (model == "gpt-4o-transcribe-diarize" || model.hasPrefix("gpt-4o-transcribe-diarize-"))
         let timestamps = configuration.provider == .groq || model == "whisper-1" || configuration.provider == .localWhisper || configuration.provider == .custom
         field("response_format", diarize ? "diarized_json" : (timestamps ? "verbose_json" : "json"))
         if timestamps { field("timestamp_granularities[]", "segment") }

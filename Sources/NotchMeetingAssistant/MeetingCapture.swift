@@ -281,7 +281,8 @@ private final class CloudTranscriptionChannel {
     private var converter: AVAudioConverter?
     private var inputFormat: AVAudioFormat?
     private let outputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
-    private var queue: [(UUID, TranscriptionAudioChunk)] = []
+    private var queue: [(UUID, Int, TranscriptionAudioChunk)] = []
+    private var clipIndex = 0
     private var worker: Task<Void, Never>?
     private var active = true
     private var previousText = ""
@@ -396,22 +397,26 @@ private final class CloudTranscriptionChannel {
             fail("Transcription cannot keep up with the audio. The session keeps text received so far; queued audio has not been transcribed.")
             return
         }
-        queue.append((UUID(), chunk))
+        clipIndex += 1
+        queue.append((UUID(), clipIndex, chunk))
         guard worker == nil else { return }
         worker = Task { [weak self] in
             guard let self else { return }
             defer { self.worker = nil }
             do {
                 while !self.queue.isEmpty, self.active, !Task.isCancelled {
-                    let (id, chunk) = self.queue.removeFirst()
+                    let (id, clip, chunk) = self.queue.removeFirst()
                     let result = try await self.provider.transcribe(wavData: chunk.data)
                     try Task.checkCancellation()
                     guard self.active else { return }
-                    let text = TranscriptOverlap.removingRepeatedPrefix(result.text, previous: self.previousText,
-                                                                        overlappingAudio: chunk.hasOverlappingAudio,
-                                                                        maximumWords: 4)
+                    // Chunker emits a 44-byte WAV header and 16 kHz mono Int16 PCM.
+                    let duration = Double(max(0, chunk.data.count - 44)) / 32_000
+                    let passages = TranscriptionPassages.make(from: result, source: self.source, chunkID: id,
+                                                               clipIndex: clip, clipDuration: duration,
+                                                               previousText: self.previousText,
+                                                               overlappingPrefixDuration: chunk.overlappingPrefixDuration)
                     self.previousText = result.text
-                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { self.onText?(id, self.source, text) }
+                    for passage in passages { self.onText?(passage.id, passage.source, passage.text) }
                 }
             } catch {
                 if !(error is CancellationError) { self.fail(error.localizedDescription) }

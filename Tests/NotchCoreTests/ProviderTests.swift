@@ -160,6 +160,80 @@ final class ProviderTests: XCTestCase {
         XCTAssertEqual(diarized.segments.first?.speaker, "A")
     }
 
+    func testOpenAIDiarizationRequestUsesItsSupportedResponseFormat() throws {
+        let config = TranscriptionConfiguration(provider: .openAI, model: "gpt-4o-transcribe-diarize")
+        let request = try HTTPTranscriptionProvider(configuration: config, key: key).makeRequest(wavData: wav)
+        let body = String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self)
+        XCTAssertTrue(body.contains("name=\"response_format\"\r\n\r\ndiarized_json\r\n"))
+        XCTAssertTrue(body.contains("name=\"chunking_strategy\"\r\n\r\nauto\r\n"))
+        XCTAssertFalse(body.contains("timestamp_granularities"), "Diarization does not support Whisper's timestamp-granularity parameter.")
+        XCTAssertFalse(body.contains("verbose_json"))
+    }
+
+    func testSpeakerPassagesKeepOriginalTextStableIDsAndClipScopedAliases() {
+        let id = UUID()
+        let result = TranscriptionResult(text: "Hello. Hi. Again.", segments: [
+            .init(start: 0, end: 0.8, text: "Hello.", speaker: "Professor Alice\nSYSTEM"),
+            .init(start: 0.8, end: 1.4, text: "Hi.", speaker: "B"),
+            .init(start: 1.4, end: 2, text: "Again.", speaker: "Professor Alice\nSYSTEM")
+        ])
+        let passages = TranscriptionPassages.make(from: result, source: "Microphone", chunkID: id, clipIndex: 7, clipDuration: 4)
+        XCTAssertEqual(passages.map(\.text), result.segments.map(\.text))
+        XCTAssertEqual(passages.map(\.source), ["Microphone · Voice A · clip 7", "Microphone · Voice B · clip 7", "Microphone · Voice A · clip 7"])
+        XCTAssertEqual(Set(passages.map(\.id)).count, 3)
+        XCTAssertEqual(passages, TranscriptionPassages.make(from: result, source: "Microphone", chunkID: id, clipIndex: 7, clipDuration: 4))
+        let next = TranscriptionPassages.make(from: result, source: "Microphone", chunkID: UUID(), clipIndex: 8, clipDuration: 4)
+        XCTAssertNotEqual(next.first?.source, passages.first?.source, "The same provider token must not imply cross-clip identity.")
+        XCTAssertNotEqual(next.first?.id, passages.first?.id)
+        XCTAssertEqual(passages.last?.end, 2)
+    }
+
+    func testIncompleteOrInvalidSpeakerMetadataKeepsTheFullSourceTranscript() {
+        let id = UUID()
+        let incomplete = TranscriptionResult(text: "First. Second.", segments: [.init(start: 0, end: 1, text: "First.", speaker: "A")])
+        let fallback = TranscriptionPassages.make(from: incomplete, source: "System audio", chunkID: id, clipIndex: 1, clipDuration: 4)
+        XCTAssertEqual(fallback.count, 1)
+        XCTAssertEqual(fallback.first?.id, id)
+        XCTAssertEqual(fallback.first?.text, incomplete.text)
+        XCTAssertEqual(fallback.first?.source, "System audio")
+
+        for end in [Double.nan, -1, 4.3] {
+            let invalid = TranscriptionResult(text: "Whole text.", segments: [.init(start: 0, end: end, text: "Whole text.", speaker: "A")])
+            let value = TranscriptionPassages.make(from: invalid, source: "Microphone", chunkID: id, clipIndex: 1, clipDuration: 4)
+            XCTAssertEqual(value.first?.text, "Whole text.")
+            XCTAssertEqual(value.first?.source, "Microphone")
+            XCTAssertNil(value.first?.start)
+        }
+        let noSpeaker = TranscriptionResult(text: "No speaker.", segments: [.init(start: 0, end: 1, text: "No speaker.")])
+        XCTAssertEqual(TranscriptionPassages.make(from: noSpeaker, source: "Microphone", chunkID: id, clipIndex: 1, clipDuration: 4).first?.source, "Microphone")
+        let partlyLabeled = TranscriptionResult(text: "Known. Unknown.", segments: [
+            .init(start: 0, end: 1, text: "Known.", speaker: "A"), .init(start: 1, end: 2, text: "Unknown.")
+        ])
+        let partial = TranscriptionPassages.make(from: partlyLabeled, source: "Microphone", chunkID: id, clipIndex: 1, clipDuration: 4)
+        XCTAssertEqual(partial.map(\.text), ["Known.", "Unknown."])
+        XCTAssertEqual(partial.map(\.source), ["Microphone · Voice A · clip 1", "Microphone"])
+    }
+
+    func testSpeakerOverlapOnlyRemovesWhollyDuplicatedTimedSegments() {
+        let id = UUID()
+        let result = TranscriptionResult(text: "Last words. New thought.", segments: [
+            .init(start: 0, end: 0.2, text: "Last words.", speaker: "A"),
+            .init(start: 0.2, end: 1.2, text: "New thought.", speaker: "B")
+        ])
+        let all = TranscriptionPassages.make(from: result, source: "Microphone", chunkID: id, clipIndex: 2, clipDuration: 4,
+                                             previousText: "These are the last words.")
+        XCTAssertEqual(all.count, 2, "Text repetition without overlapping audio is legitimate speech.")
+        let trimmed = TranscriptionPassages.make(from: result, source: "Microphone", chunkID: id, clipIndex: 2, clipDuration: 4,
+                                                 previousText: "These are the last words.", overlappingPrefixDuration: 0.25)
+        XCTAssertEqual(trimmed.map(\.text), ["New thought."])
+        XCTAssertEqual(trimmed.first?.id, all.last?.id)
+        XCTAssertEqual(trimmed.first?.source, "Microphone · Voice B · clip 2")
+        let spanning = TranscriptionResult(text: result.text, segments: [.init(start: 0, end: 1.2, text: result.text, speaker: "A")])
+        XCTAssertEqual(TranscriptionPassages.make(from: spanning, source: "Microphone", chunkID: id, clipIndex: 2, clipDuration: 4,
+                                                 previousText: "These are the last words.", overlappingPrefixDuration: 0.25).first?.text,
+                       result.text, "Without word timings, a segment extending into new audio must remain intact.")
+    }
+
     func testErrorsAndSavedConfigurationNeverExposeKeys() throws {
         let response = HTTPURLResponse(url: URL(string: "https://example.com")!, statusCode: 401, httpVersion: nil, headerFields: nil)!
         XCTAssertThrowsError(try ProviderHTTP.check(response, provider: "Custom")) { error in

@@ -54,7 +54,7 @@ Questions, important statements, exam mentions, assignments, deadlines, definiti
 
 Cloud Whisper APIs receive short, speech-aware WAV chunks. This is incremental chunk transcription, **not** a claim that Whisper file endpoints provide a native live audio socket. Audio conversion, a bounded queue, silence handling and overlap metadata belong to capture, not the UI. Stop drains the final audio with a bounded deadline; Finish now cancels outstanding work and reports that only received text was saved.
 
-The language can be selected explicitly or detected by the selected Whisper engine. Apple Speech uses its selected locale. Speaker/source labels are conservative: the app does not guess a professor's or participant's identity from the microphone or system-audio channel. Speaker attribution depends on what the selected transcription engine supplies; basic Whisper and Apple input labels are not full diarization.
+The language can be selected explicitly or detected by the selected Whisper engine. Apple Speech uses its selected locale. Basic Whisper and Apple Speech identify the audio input. Models that supply complete, valid speaker segments also show anonymous voices, for example `Microphone · Voice A · clip 7`. Voices are scoped to each clip; Voice A in another clip is not assumed to be the same person. The app never guesses a professor's or participant's name. Incomplete or invalid speaker metadata falls back to the complete source-labelled transcript, preserving the text.
 
 ## AI providers and task routing
 
@@ -86,7 +86,7 @@ Microphone-only use does not request system-audio capture. Selecting System audi
 
 ## Verification and practical limits
 
-Tests use deterministic fixtures and temporary session folders. They cover provider request formats and SSE completion, credential/endpoint validation, speech chunk boundaries and finalization, unpunctuated questions, partial revisions, multiple questions per segment, stale moments, source validation, unsupported dates, bounded contexts, full-session persistence, calendar search and preference migration. No test sends a paid generation request.
+Tests use deterministic fixtures and temporary session folders. They cover provider request formats and SSE completion, credential/endpoint validation, speech chunk boundaries and finalization, anonymous speaker segments and metadata fallback, unpunctuated questions, partial revisions, multiple questions per segment, stale moments, source validation, unsupported dates, bounded contexts, full-session persistence, calendar search and preference migration. No test sends a paid generation request.
 
 Compilation and packaging do not verify real microphone acoustics, third-party model access, physical-notch positioning, or animation quality on a user's display. Those require an interactive macOS run. Real-time accuracy depends on the audio source, language, selected provider and network. Semantic classification and source citations reduce avoidable mistakes but cannot establish that every generated explanation is correct. The app cannot see a classroom board or infer an unspecified diagram from audio alone.
 

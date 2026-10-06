@@ -7,7 +7,15 @@ import NotchCore
 @main
 struct NotchMeetingAssistantApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    var body: some Scene { Settings { EmptyView() } }
+    var body: some Scene {
+        Settings { EmptyView() }
+            .commands {
+                CommandGroup(replacing: .appSettings) {
+                    Button("Settings…") { delegate.openSettingsFromCommand() }
+                        .keyboardShortcut(",", modifiers: .command)
+                }
+            }
+    }
 }
 
 private final class NotchPanel: NSPanel {
@@ -174,6 +182,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         model.collapse()
     }
+
+    func openSettingsFromCommand() { model.openMain(.settings) }
 
     @objc private func showCompanion() { model.openMain() }
     @objc private func showSettings() { model.openMain(.settings) }

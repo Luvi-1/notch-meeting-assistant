@@ -59,7 +59,7 @@ struct ProviderSettingsView: View {
                 }
                 Text("The microphone hears the room. System audio captures sound playing on your Mac.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(3)
-                Text("Labels identify audio inputs unless the transcription model supplies speakers.")
+                Text("Supported models distinguish voices within each audio clip. Speaker names are never inferred.")
                     .font(.system(size: 10)).foregroundStyle(.tertiary).lineSpacing(3)
                 if !model.settings.includeMicrophone && !model.settings.captureSystemAudio {
                     Label("Choose at least one audio source.", systemImage: "exclamationmark.circle")
