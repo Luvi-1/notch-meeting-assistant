@@ -24,3 +24,25 @@ The physical notch remains black. Its resting indicator is compact; detected que
 `DesignPreviewTests` renders the shipping views using fictional fixture data on macOS CI. It creates Home, session review, transcript, notes, memory, settings, Groq configuration and notch PNGs. The debug-only model initializer does not read Keychain or saved sessions and does not start capture, timers or network requests.
 
 The workflow uploads the images as **Notch-Design-Previews**. Inspect these for visual hierarchy, text wrapping, control contrast, clipping and empty states. Rendering is a useful layout check; real-device audio, physical camera geometry and animation feel still require an interactive macOS run.
+
+### Reviewed screens
+
+These committed images come from source commit `043a635a5aecc49cdae0455e6e879329cb8111f9`, verified by [macOS CI](https://github.com/Luvi-1/notch-meeting-assistant/actions/runs/37511546785). The run passed 62 tests, rendered 13 states, and built the universal application. The render harness captures SwiftUI content with fictional data; it does not include the desktop or native window controls.
+
+**Home — 900 × 700.** One primary action, two recent sessions, and Continue Reviewing visible without scrolling at the default size.
+
+![Home](previews/home.png)
+
+**The listening notch.** The compact indicator uses a reserved camera gap. A question expands the same surface horizontally to a 650 × 120 preview in this fixture.
+
+![Compact listening indicator](previews/listening-notch.png)
+
+![Question preview](previews/question-notch.png)
+
+**Transcript.** Source, time, moment classification and passage actions remain close to the text. The selected passage has a quiet highlight.
+
+![Transcript](previews/transcript.png)
+
+**Groq transcription.** Speech model selection is separate from the answering model. Saved keys are never displayed in the field. This fixture has no credential.
+
+![Groq transcription settings](previews/groq-transcription.png)
