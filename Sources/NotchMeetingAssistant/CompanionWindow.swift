@@ -2,143 +2,120 @@ import SwiftUI
 import AppKit
 import NotchCore
 
-enum CompanionPalette {
-    static let canvas = Color(nsColor: .textBackgroundColor)
-    static let sidebar = Color(nsColor: .windowBackgroundColor)
-    static let wash = Color.primary.opacity(0.045)
-}
-
-struct CompanionPrimaryButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var enabled
-    @Environment(\.colorScheme) private var colorScheme
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
-            .padding(.horizontal, 20).padding(.vertical, 13)
-            .background(Color.primary.opacity(enabled ? (configuration.isPressed ? 0.78 : 1) : 0.25), in: Capsule())
-            .contentShape(Capsule())
-    }
-}
-
 @MainActor
 struct CompanionWindow: View {
     @ObservedObject var model: MeetingModel
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            VStack(spacing: 0) {
-                if let error = model.error { errorBanner(error) }
-                destination
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(CompanionPalette.canvas)
+        VStack(spacing: 0) {
+            commandHeader
+            CompanionHairline()
+            if let error = model.error { errorBanner(error) }
+            destination
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            statusBar
         }
-        .frame(minWidth: 900, minHeight: 620)
+        .frame(minWidth: 820, minHeight: 620)
         .background(CompanionPalette.canvas)
-        .tint(.primary)
+        .foregroundStyle(.white)
+        .preferredColorScheme(.dark)
+        .tint(.white)
         .sheet(item: $model.configuringProvider) { provider in
             ProviderConfigurationView(model: model, provider: provider)
+                .preferredColorScheme(.dark)
         }
     }
 
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
+    private var commandHeader: some View {
+        HStack(spacing: 22) {
             Button { model.openMain(.home) } label: {
-                HStack(spacing: 11) {
-                    Image(systemName: "waveform").font(.system(size: 20, weight: .medium))
-                    Text("Notch").font(.system(size: 21, weight: .semibold)).tracking(-0.7)
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform").font(.system(size: 17, weight: .medium))
+                    Text("Notch").font(.system(size: 15, weight: .semibold)).tracking(-0.4)
                 }
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 10)
-            .padding(.bottom, 38)
-            navItem(.home, title: "Home", symbol: "house", key: "1")
-            navItem(.sessions, title: "Sessions", symbol: "rectangle.stack", key: "2")
-            navItem(.notes, title: "Notes", symbol: "square.and.pencil", key: "3")
-            navItem(.search, title: "Search", symbol: "magnifyingglass", key: "k")
-            Spacer(minLength: 28)
-            if model.isListening || model.isStarting || model.isStopping {
-                VStack(alignment: .leading, spacing: 11) {
-                    HStack(spacing: 9) {
-                        Image(systemName: "waveform").font(.system(size: 14))
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(model.isStopping ? "Saving…" : (model.isStarting ? "Starting…" : "Listening"))
-                                .font(.system(size: 12, weight: .medium))
-                            Text(model.elapsedLabel)
-                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button { Task { await finishListeningSession(model) } } label: {
-                            Image(systemName: "stop.fill").font(.system(size: 9)).frame(width: 25, height: 25)
-                        }
-                        .buttonStyle(.plain).help("Stop listening").accessibilityLabel("Stop listening").disabled(model.isStopping)
-                    }
-                    if model.isStopping {
-                        Button("Finish now") { model.cancelFinishing() }
-                            .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
-                            .help("Save received transcript and cancel pending transcription")
-                    } else if let sessionID = model.activeSessionID {
-                        Button("Open live session") { model.openMain(.sessions, sessionID: sessionID) }
-                            .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                }
-                .padding(12)
-                .background(CompanionPalette.wash, in: RoundedRectangle(cornerRadius: 12))
-                .padding(.bottom, 18)
+            .buttonStyle(.plain).padding(.trailing, 10)
+            HStack(spacing: 3) {
+                navItem(.home, title: "Home", key: "1")
+                navItem(.sessions, title: "Sessions", key: "2")
+                navItem(.notes, title: "Notes", key: "3")
             }
-            navItem(.settings, title: "Settings", symbol: "slider.horizontal.3", key: ",")
-            Text("A little less to remember.")
-                .font(.system(size: 10)).foregroundStyle(.tertiary)
-                .padding(.horizontal, 10).padding(.top, 16)
+            Spacer(minLength: 12)
+            Button { model.openMain(.search) } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 12))
+                    Text("Search").font(.system(size: 11))
+                    ShortcutKeycap(text: "⌘K")
+                }
+                .foregroundStyle(model.destination == .search ? .white : .white.opacity(0.45))
+            }
+            .buttonStyle(.plain).keyboardShortcut("k", modifiers: .command)
+            Button { model.openMain(.settings) } label: {
+                Image(systemName: "slider.horizontal.3").font(.system(size: 13))
+                    .foregroundStyle(model.destination == .settings ? .white : .white.opacity(0.45))
+                    .frame(width: 26, height: 28).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).keyboardShortcut(",", modifiers: .command)
+            .help("Settings").accessibilityLabel("Settings")
         }
-        .padding(.horizontal, 17).padding(.top, 57).padding(.bottom, 25)
-        .frame(width: 202)
-        .background(CompanionPalette.sidebar)
+        .padding(.horizontal, 28).padding(.top, 32).padding(.bottom, 17)
     }
 
-    private func navItem(_ destination: CompanionDestination, title: String, symbol: String, key: KeyEquivalent) -> some View {
+    private func navItem(_ destination: CompanionDestination, title: String, key: KeyEquivalent) -> some View {
         Button {
             if destination == .sessions { model.selectedSessionID = nil; model.highlightedTranscriptID = nil }
             model.openMain(destination)
         } label: {
-            HStack(spacing: 11) {
-                Image(systemName: symbol).font(.system(size: 14, weight: .regular)).frame(width: 20)
-                Text(title).font(.system(size: 12.5, weight: model.destination == destination ? .semibold : .regular))
-                Spacer()
-                if destination == .search {
-                    Text("⌘K").font(.system(size: 10)).foregroundStyle(.tertiary)
-                }
-            }
-            .foregroundStyle(model.destination == destination ? Color.primary : Color.secondary)
-            .padding(.horizontal, 10).padding(.vertical, 10)
-            .background(model.destination == destination ? CompanionPalette.wash : .clear, in: RoundedRectangle(cornerRadius: 8))
-            .contentShape(Rectangle())
+            Text(title).font(.system(size: 11.5, weight: model.destination == destination ? .medium : .regular))
+                .foregroundStyle(model.destination == destination ? .white.opacity(0.95) : .white.opacity(0.43))
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(model.destination == destination ? Color.white.opacity(0.075) : .clear,
+                            in: RoundedRectangle(cornerRadius: 7))
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .keyboardShortcut(key, modifiers: .command)
-        .padding(.bottom, 3)
+        .buttonStyle(.plain).keyboardShortcut(key, modifiers: .command)
         .accessibilityAddTraits(model.destination == destination ? .isSelected : [])
+    }
+
+    private var statusBar: some View {
+        HStack(spacing: 7) {
+            Circle().fill(Color.white.opacity(model.isListening ? 0.85 : 0.28)).frame(width: 4, height: 4)
+            Text(model.isStopping ? "Saving the last words…" : (model.isStarting ? "Preparing to listen…" : (model.isListening ? "Listening · \(model.elapsedLabel)" : "Ready")))
+                .font(.system(size: 10, weight: .medium))
+            if model.isListening || model.isStarting || model.isStopping {
+                Button("Open session") { model.openMain(.sessions, sessionID: model.activeSessionID) }
+                    .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary).padding(.leading, 8)
+                Spacer()
+                if model.isStopping {
+                    Button("Finish now") { model.cancelFinishing() }
+                        .buttonStyle(.plain).font(.system(size: 10))
+                        .help("Save received transcript and cancel pending transcription")
+                } else {
+                    Button { Task { await finishListeningSession(model) } } label: {
+                        Label(model.isStarting ? "Cancel" : "Stop", systemImage: "stop.fill").font(.system(size: 10))
+                    }.buttonStyle(.plain)
+                }
+            } else {
+                Spacer()
+                ShortcutKeycap(text: "⌘⇧L")
+                Text("Start listening").font(.system(size: 10))
+            }
+        }
+        .foregroundStyle(Color.white.opacity(0.38))
+        .padding(.horizontal, 28).padding(.vertical, 10)
+        .overlay(alignment: .top) { CompanionHairline() }
     }
 
     @ViewBuilder private var destination: some View {
         switch model.destination {
-        case .home:
-            CompanionHomeView(model: model)
+        case .home: CompanionHomeView(model: model)
         case .sessions:
             if let id = model.selectedSessionID, model.sessions.contains(where: { $0.id == id }) {
                 SessionDetailView(model: model, sessionID: id).id(id)
-            } else {
-                SessionLibraryView(model: model)
-            }
-        case .notes:
-            CompanionNotesView(model: model)
-        case .search:
-            CompanionSearchView(model: model)
-        case .settings:
-            ProviderSettingsView(model: model)
+            } else { SessionLibraryView(model: model) }
+        case .notes: CompanionNotesView(model: model)
+        case .search: CompanionSearchView(model: model)
+        case .settings: ProviderSettingsView(model: model)
         }
     }
 
@@ -150,23 +127,26 @@ struct CompanionWindow: View {
                 Button(model.needsRecordingPermission ? "Open Privacy Settings" : "Open Settings") {
                     if model.needsRecordingPermission { model.openRecordingSettings() }
                     else { model.openMain(.settings) }
-                }.buttonStyle(.plain).fontWeight(.semibold)
+                }.buttonStyle(.plain).fontWeight(.medium)
             }
             Spacer()
             Button { model.error = nil } label: { Image(systemName: "xmark").frame(width: 22, height: 22) }
                 .buttonStyle(.plain).help("Dismiss").accessibilityLabel("Dismiss error")
         }
-        .font(.system(size: 12))
-        .padding(18).padding(.top, 27)
+        .font(.system(size: 11)).foregroundStyle(.white.opacity(0.75))
+        .padding(.horizontal, 28).padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(CompanionPalette.wash)
+        .background(CompanionPalette.surface)
     }
 }
 
 @MainActor
 private struct CompanionHomeView: View {
     @ObservedObject var model: MeetingModel
-    private var recent: [ListeningSession] { Array(model.sessions.sorted { $0.startedAt > $1.startedAt }.prefix(4)) }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var recent: [ListeningSession] { Array(model.sessions.sorted { $0.startedAt > $1.startedAt }.prefix(3)) }
+    private var busy: Bool { model.isListening || model.isStarting || model.isStopping }
     private var reviewSession: ListeningSession? {
         model.sessions.sorted { $0.startedAt > $1.startedAt }.first {
             $0.endedAt != nil && (!$0.moments.isEmpty || !$0.notes.isEmpty)
@@ -177,43 +157,73 @@ private struct CompanionHomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Eyebrow(text: Date.now.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()))
+                    Eyebrow(text: "Your listening companion")
                     Spacer()
-                    Button { model.openMain(.search) } label: {
-                        Label("Ask your memory", systemImage: "magnifyingglass").font(.system(size: 11))
-                    }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    Text(Date.now, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
+                        .font(.system(size: 10)).foregroundStyle(.white.opacity(0.3))
                 }
-                .padding(.bottom, 35)
+                .padding(.bottom, 23)
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 9) {
+                        Text(busy ? "Listening, quietly." : "Stay in the moment.")
+                            .font(.system(size: 30, weight: .semibold)).tracking(-1)
+                        Text(busy ? "Your transcript and important moments are being saved." : "Let Notch keep the details.")
+                            .font(.system(size: 13)).foregroundStyle(.white.opacity(0.43))
+                    }
+                    Spacer()
+                    Image(systemName: "waveform").font(.system(size: 39, weight: .ultraLight))
+                        .foregroundStyle(.white.opacity(busy ? 0.8 : 0.2))
+                        .symbolEffect(.variableColor.iterative, options: .repeating, isActive: model.isListening && !reduceMotion)
+                        .frame(width: 64)
+                }
+                .padding(.bottom, 27)
 
-                Text(model.isListening ? "Stay in the moment." : "Ready when you are.")
-                    .font(.system(size: 35, weight: .semibold)).tracking(-1.2)
-                Text("Lectures, conversations, and everything in between.")
-                    .font(.system(size: 14)).foregroundStyle(.secondary).padding(.top, 10)
+                listeningSurface
 
-                listeningControl.padding(.top, 30).padding(.bottom, 43)
+                Button { model.openMain(.search) } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(.white.opacity(0.4))
+                        Text("Ask your memory").font(.system(size: 12)).foregroundStyle(.white.opacity(0.62))
+                        Spacer()
+                        Text("Find a thought, a question, a moment").font(.system(size: 10)).foregroundStyle(.white.opacity(0.26))
+                        ShortcutKeycap(text: "⌘K")
+                    }
+                    .padding(.vertical, 18).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .overlay(alignment: .bottom) { CompanionHairline() }
 
-                HStack {
-                    Text("Recent sessions").font(.system(size: 14, weight: .semibold))
+                HStack(spacing: 8) {
+                    Text("Recent sessions").font(.system(size: 12, weight: .medium))
+                    if !model.sessions.isEmpty {
+                        Text("\(model.sessions.count)").font(.system(size: 10)).foregroundStyle(.white.opacity(0.3))
+                    }
                     Spacer()
                     if !recent.isEmpty {
-                        Button("View all") {
+                        Button {
                             model.selectedSessionID = nil
                             model.openMain(.sessions)
-                        }
-                        .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
+                        } label: { Label("View all", systemImage: "arrow.up.right").font(.system(size: 10)) }
+                            .buttonStyle(.plain).foregroundStyle(.white.opacity(0.4))
                     }
                 }
-                .padding(.bottom, 13)
+                .padding(.top, 25).padding(.bottom, 8)
 
                 if recent.isEmpty {
-                    EmptyCompanionState(symbol: "waveform", title: "Your first session starts here.",
-                                        message: "Start listening and your transcript, questions, and important moments will have a home.")
-                        .padding(.vertical, 16)
+                    HStack(spacing: 14) {
+                        Image(systemName: "waveform.path").font(.system(size: 22, weight: .ultraLight))
+                            .foregroundStyle(.white.opacity(0.18)).frame(width: 36)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("A fresh start.").font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.6))
+                            Text("Your conversations will find a home here.").font(.system(size: 11)).foregroundStyle(.white.opacity(0.3))
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 24)
                 } else {
                     VStack(spacing: 0) {
                         ForEach(recent) { session in
-                            SessionListRow(session: session, isActive: model.activeSessionID == session.id && (model.isListening || model.isStarting || model.isStopping)) {
+                            SessionListRow(session: session, isActive: model.activeSessionID == session.id && busy) {
                                 model.openMain(.sessions, sessionID: session.id)
                             }
                         }
@@ -221,80 +231,82 @@ private struct CompanionHomeView: View {
                 }
 
                 if let session = reviewSession {
-                    VStack(alignment: .leading, spacing: 15) {
-                        Eyebrow(text: "Continue reviewing")
-                        Button { model.openMain(.sessions, sessionID: session.id) } label: {
-                            HStack(alignment: .center, spacing: 14) {
-                                Image(systemName: "book").font(.system(size: 20, weight: .light))
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(session.title).font(.system(size: 16, weight: .medium)).lineLimit(1)
-                                    Text("\(session.moments.count) moments · \(session.notes.count) saved notes")
-                                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: "arrow.right").font(.system(size: 13))
-                            }
-                            .contentShape(Rectangle())
+                    Button { model.openMain(.sessions, sessionID: session.id) } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "arrow.counterclockwise").font(.system(size: 10))
+                            Text("Continue reviewing").font(.system(size: 10))
+                            Text(session.title).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                            Spacer()
+                            Image(systemName: "arrow.right").font(.system(size: 10))
                         }
-                        .buttonStyle(.plain)
+                        .foregroundStyle(.white.opacity(0.45)).padding(.vertical, 15).contentShape(Rectangle())
                     }
-                    .padding(.top, 33)
+                    .buttonStyle(.plain).padding(.top, 6)
                 }
             }
-            .padding(.horizontal, 46).padding(.top, 54).padding(.bottom, 42)
-            .frame(maxWidth: 940, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .padding(.horizontal, 40).padding(.top, 30).padding(.bottom, 24)
+            .frame(maxWidth: 830, alignment: .leading).frame(maxWidth: .infinity, alignment: .top)
         }
     }
 
-    private var listeningControl: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            if model.isListening || model.isStarting || model.isStopping {
-                HStack(spacing: 16) {
-                    Button { Task { await finishListeningSession(model) } } label: {
-                        Label(model.isStopping ? "Saving…" : (model.isStarting ? "Cancel Starting" : "Stop Listening"), systemImage: "stop.fill")
-                    }
-                    .buttonStyle(CompanionPrimaryButtonStyle()).disabled(model.isStopping)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(model.isStopping ? "Saving the last words…" : (model.isStarting ? "Requesting access…" : model.contextLabel)).font(.system(size: 12, weight: .medium))
-                        Text(model.elapsedLabel).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                    }
+    private var listeningSurface: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Circle().fill(Color.white.opacity(busy ? 0.85 : 0.4)).frame(width: 5, height: 5)
+                Text(model.isStopping ? "Finishing your session" : (model.isStarting ? "Preparing to listen" : (model.isListening ? model.contextLabel : "Ready to listen")))
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.72))
+                Spacer()
+                if busy {
+                    Text(model.elapsedLabel).font(.system(size: 11, design: .monospaced)).foregroundStyle(.white.opacity(0.38))
+                } else {
+                    Text("Lecture · Conversation · Anything").font(.system(size: 10)).foregroundStyle(.white.opacity(0.3))
                 }
-                if model.isStopping {
-                    Button("Finish now") { model.cancelFinishing() }
-                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
-                        .help("Save received transcript and cancel pending transcription")
-                } else if let id = model.activeSessionID {
-                    Button("Open live transcript") { model.openMain(.sessions, sessionID: id) }
-                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
-                }
-            } else {
-                Button { Task { await model.start() } } label: {
-                    HStack(spacing: 11) {
-                        Image(systemName: "waveform").font(.system(size: 15, weight: .medium))
-                        Text("Start Listening")
-                        Image(systemName: "arrow.up.right").font(.system(size: 11, weight: .medium)).padding(.leading, 9)
-                    }
-                    .padding(.vertical, 3)
-                }
-                .buttonStyle(CompanionPrimaryButtonStyle()).disabled(!model.hasConsent)
-                Toggle("Everyone here agrees to transcription", isOn: $model.hasConsent)
-                    .toggleStyle(.checkbox).font(.system(size: 11))
-                Text(audioDisclosure).font(.system(size: 10)).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 16)
+            CompanionHairline().padding(.horizontal, 20)
+            HStack(spacing: 19) {
+                Button {
+                    Task {
+                        if busy { await finishListeningSession(model) }
+                        else { await model.start() }
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: busy ? "stop.fill" : "waveform").font(.system(size: busy ? 9 : 13, weight: .medium))
+                        Text(model.isStopping ? "Saving…" : (model.isStarting ? "Cancel Starting" : (model.isListening ? "Stop Listening" : "Start Listening")))
+                        if !busy { Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .semibold)).padding(.leading, 12) }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .buttonStyle(CompanionPrimaryButtonStyle()).disabled(model.isStopping)
+                VStack(alignment: .leading, spacing: 4) {
+                    if model.isStopping {
+                        Button("Finish now") { model.cancelFinishing() }
+                            .buttonStyle(.plain).font(.system(size: 11))
+                            .help("Save received transcript and cancel pending transcription")
+                    } else if let id = model.activeSessionID, busy {
+                        Button("Open live transcript") { model.openMain(.sessions, sessionID: id) }
+                            .buttonStyle(.plain).font(.system(size: 11))
+                    } else {
+                        Text("Every kind of conversation.").font(.system(size: 11)).foregroundStyle(.white.opacity(0.65))
+                    }
+                    Text(audioLabel).font(.system(size: 10)).foregroundStyle(.white.opacity(0.3)).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if !busy { ShortcutKeycap(text: "⌘⇧L") }
+            }
+            .padding(.horizontal, 22).padding(.vertical, 20)
         }
+        .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(CompanionPalette.hairline, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.15), radius: 14, y: 8)
     }
 
-    private var audioDisclosure: String {
-        switch model.settings.transcription.provider {
-        case .auto, .apple:
-            return "Audio uses Apple Speech. AI features use your configured providers."
-        case .localWhisper:
-            return "Audio uses your local Whisper server. AI features use your configured providers."
-        default:
-            return "Audio is sent to \(model.settings.transcription.provider.displayName). AI features use your configured providers."
-        }
+    private var audioLabel: String {
+        let inputs = [model.settings.includeMicrophone ? "Microphone" : nil,
+                      model.settings.captureSystemAudio ? "System audio" : nil].compactMap { $0 }.joined(separator: " + ")
+        let provider = model.settings.transcription.provider == .auto ? "Apple Speech" : model.settings.transcription.provider.displayName
+        return inputs.isEmpty ? "Choose an audio input in Settings" : "\(inputs) · \(provider)"
     }
 }
 
@@ -311,7 +323,7 @@ private struct SessionLibraryView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 23) {
-                CompanionPageHeader(eyebrow: "Your memory", title: "Sessions", subtitle: "Everything you heard, ready to come back to.")
+                CompanionPageHeader(eyebrow: "Your memory", title: "Sessions", subtitle: "The conversations you can come back to.")
                 HStack(spacing: 9) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Find a session", text: $filter).textFieldStyle(.plain)
@@ -320,8 +332,9 @@ private struct SessionLibraryView: View {
                             .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Clear session filter")
                     }
                 }
-                .font(.system(size: 13)).padding(12)
-                .background(CompanionPalette.wash, in: RoundedRectangle(cornerRadius: 9))
+                .font(.system(size: 12)).padding(.horizontal, 14).padding(.vertical, 11)
+                .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(CompanionPalette.hairline, lineWidth: 0.5))
                 if sessions.isEmpty {
                     EmptyCompanionState(symbol: "rectangle.stack", title: filter.isEmpty ? "A place for your conversations." : "No matching sessions.",
                                         message: filter.isEmpty ? "Start listening from Home. Sessions are organized automatically as they take shape." : "Try a different title, or use Search to look inside your sessions.")
@@ -336,7 +349,7 @@ private struct SessionLibraryView: View {
                     }
                 }
             }
-            .padding(.horizontal, 46).padding(.top, 52).padding(.bottom, 40)
+            .padding(.horizontal, 32).padding(.top, 24).padding(.bottom, 30)
         }
     }
 }
@@ -348,18 +361,18 @@ private struct SessionListRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 15) {
+            HStack(spacing: 13) {
                 Image(systemName: sessionSymbol(session.kind))
-                    .font(.system(size: 17, weight: .light)).frame(width: 32)
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(session.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    .font(.system(size: 15, weight: .light)).frame(width: 27)
+                    .foregroundStyle(.white.opacity(0.35))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(session.title).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.86)).lineLimit(1)
                     HStack(spacing: 6) {
                         Text(isActive ? "Listening now" : sessionKindLabel(session.kind))
                         Text("·")
                         Text(session.startedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
                     }
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                    .font(.system(size: 10)).foregroundStyle(.white.opacity(0.34))
                 }
                 Spacer()
                 if isActive {
@@ -369,10 +382,10 @@ private struct SessionListRow: View {
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .medium)).foregroundStyle(.tertiary).padding(.leading, 9)
                 }
             }
-            .padding(.vertical, 18).contentShape(Rectangle())
+            .padding(.vertical, 14).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.055)).frame(height: 0.5) }
+        .overlay(alignment: .bottom) { CompanionHairline() }
     }
 }
 
@@ -384,7 +397,7 @@ private struct SessionDetailView: View {
     @State private var noteDraft: TranscriptNoteDraft?
 
     private enum DetailTab: String, CaseIterable, Identifiable {
-        case summary = "Summary", transcript = "Full Transcript", moments = "Moments"
+        case summary = "Summary", transcript = "Transcript", moments = "Moments"
         var id: String { rawValue }
     }
     private var session: ListeningSession? { model.sessions.first { $0.id == sessionID } }
@@ -394,12 +407,23 @@ private struct SessionDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let session {
-                header(session).padding(.horizontal, 38).padding(.top, 43).padding(.bottom, 20)
-                HStack {
-                    Picker("Session view", selection: $tab) {
-                        ForEach(DetailTab.allCases) { Text($0.rawValue).tag($0) }
+                header(session).padding(.horizontal, 32).padding(.top, 22).padding(.bottom, 21)
+                HStack(spacing: 23) {
+                    ForEach(DetailTab.allCases) { item in
+                        Button { tab = item } label: {
+                            HStack(spacing: 5) {
+                                Text(item.rawValue)
+                                if item == .moments && !session.moments.isEmpty {
+                                    Text("\(session.moments.count)").font(.system(size: 9)).foregroundStyle(.white.opacity(0.28))
+                                }
+                            }
+                            .font(.system(size: 11, weight: item == tab ? .medium : .regular))
+                            .foregroundStyle(.white.opacity(item == tab ? 0.94 : 0.4))
+                            .padding(.bottom, 12).contentShape(Rectangle())
+                            .overlay(alignment: .bottom) { if item == tab { Color.white.opacity(0.85).frame(height: 1.5) } }
+                        }
+                        .buttonStyle(.plain).accessibilityAddTraits(item == tab ? .isSelected : [])
                     }
-                    .pickerStyle(.segmented).frame(width: 320)
                     Spacer()
                     if model.summarizingSessionIDs.contains(sessionID) {
                         ProgressView().controlSize(.mini)
@@ -411,7 +435,9 @@ private struct SessionDetailView: View {
                             .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                 }
-                .padding(.horizontal, 38).padding(.bottom, 20)
+                .padding(.horizontal, 32)
+                .overlay(alignment: .bottom) { CompanionHairline() }
+                .padding(.bottom, 17)
                 Group {
                     switch tab {
                     case .summary: summaryContent(session)
@@ -439,17 +465,17 @@ private struct SessionDetailView: View {
     }
 
     private func header(_ session: ListeningSession) -> some View {
-        VStack(alignment: .leading, spacing: 17) {
+        VStack(alignment: .leading, spacing: 15) {
             Button {
                 model.selectedSessionID = nil
                 model.highlightedTranscriptID = nil
             } label: {
-                Label("All sessions", systemImage: "chevron.left").font(.system(size: 11))
+                Label("All sessions", systemImage: "chevron.left").font(.system(size: 10))
             }
             .buttonStyle(.plain).foregroundStyle(.secondary)
             HStack(alignment: .top, spacing: 20) {
                 VStack(alignment: .leading, spacing: 9) {
-                    Text(session.title).font(.system(size: 27, weight: .semibold)).tracking(-0.7)
+                    Text(session.title).font(.system(size: 25, weight: .semibold)).tracking(-0.7)
                         .lineLimit(2).textSelection(.enabled)
                     HStack(spacing: 7) {
                         Text(sessionKindLabel(session.kind))
@@ -457,14 +483,14 @@ private struct SessionDetailView: View {
                         Text(session.startedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
                         if !isLive { Text("·"); Text(sessionDuration(session)) }
                     }
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
                 }
                 Spacer(minLength: 0)
                 if isLive {
                     Button { Task { await finishListeningSession(model) } } label: {
                         Label(model.isStopping ? "Saving…" : "Stop", systemImage: "stop.fill")
                     }
-                    .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small).disabled(model.isStopping)
+                    .buttonStyle(CompanionSecondaryButtonStyle()).disabled(model.isStopping)
                     if model.isStopping {
                         Button("Finish now") { model.cancelFinishing() }
                             .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary)
@@ -481,7 +507,7 @@ private struct SessionDetailView: View {
                 if let summary = session.summary {
                     VStack(alignment: .leading, spacing: 12) {
                         Eyebrow(text: session.kind == .automatic ? "Session summary" : "\(session.kind.rawValue) summary")
-                        Text(summary.overview).font(.system(size: 15)).lineSpacing(6).textSelection(.enabled)
+                        Text(summary.overview).font(.system(size: 14)).lineSpacing(6).foregroundStyle(.white.opacity(0.84)).textSelection(.enabled)
                         SummarySources(ids: summary.overviewSourceTranscriptIDs, lines: lines, onSelect: showSource)
                         if summary.usedFallback {
                             Label("Organized from transcript highlights", systemImage: "text.alignleft")
@@ -490,13 +516,13 @@ private struct SessionDetailView: View {
                     }
                     ForEach(summary.sections.filter { !$0.content.isEmpty }) { section in
                         VStack(alignment: .leading, spacing: 12) {
-                            Text(section.title).font(.system(size: 15, weight: .semibold))
+                            Text(section.title).font(.system(size: 14, weight: .semibold)).tracking(-0.15)
                             ForEach(Array(section.content.enumerated()), id: \.offset) { _, item in
                                 HStack(alignment: .top, spacing: 10) {
                                     if section.content.count > 1 {
                                         Circle().fill(Color.primary.opacity(0.4)).frame(width: 3, height: 3).padding(.top, 9)
                                     }
-                                    Text(item).font(.system(size: 13)).lineSpacing(5)
+                                    Text(item).font(.system(size: 13)).lineSpacing(5).foregroundStyle(.white.opacity(0.72))
                                         .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
                                 }
                             }
@@ -531,7 +557,7 @@ private struct SessionDetailView: View {
                     }
                 }
             }
-            .padding(.horizontal, 40).padding(.top, 5).padding(.bottom, 30)
+            .padding(.horizontal, 32).padding(.top, 4).padding(.bottom, 30)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -546,7 +572,7 @@ private struct SessionDetailView: View {
                     ForEach(session.moments) { moment in momentRow(moment) }
                 }
             }
-            .padding(.horizontal, 40).padding(.top, 6).padding(.bottom, 30)
+            .padding(.horizontal, 32).padding(.top, 6).padding(.bottom, 30)
         }
     }
 
@@ -606,30 +632,36 @@ private struct SessionDetailView: View {
                     }
                 }
             }
-            if !model.intelligenceStatus.isEmpty {
-                Text(model.intelligenceStatus).font(.system(size: 10)).foregroundStyle(.secondary)
-                    .lineLimit(2).textSelection(.enabled).help(model.intelligenceStatus)
-            }
             HStack(spacing: 10) {
+                Image(systemName: "text.bubble").font(.system(size: 12)).foregroundStyle(.white.opacity(0.35))
                 TextField("Ask about this session…", text: $model.question)
-                    .textFieldStyle(.plain).font(.system(size: 13))
+                    .textFieldStyle(.plain).font(.system(size: 12))
                     .onSubmit { if !model.isAnswering { model.requestAnswer() } }
                     .accessibilityLabel("Ask about this session")
+                ShortcutKeycap(text: "⌘↵")
                 Button {
                     if model.isAnswering { model.cancelAnswer() }
                     else { model.requestAnswer() }
                 } label: {
                     Image(systemName: model.isAnswering ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 12, weight: .semibold)).frame(width: 27, height: 27)
+                        .font(.system(size: 11, weight: .semibold)).frame(width: 28, height: 28)
+                        .foregroundStyle(Color.black.opacity(0.85))
+                        .background(.white.opacity(model.canAnswer || model.isAnswering ? 0.95 : 0.24), in: Circle())
                 }
                 .buttonStyle(.plain).disabled(!model.isAnswering && !model.canAnswer)
                 .accessibilityLabel(model.isAnswering ? "Cancel answer" : "Ask question")
                 .keyboardShortcut(.return, modifiers: .command)
             }
-            .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 7)
-            .background(CompanionPalette.wash, in: RoundedRectangle(cornerRadius: 11))
+            .padding(.leading, 16).padding(.trailing, 8).padding(.vertical, 8)
+            .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 13))
+            .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(CompanionPalette.hairline, lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.14), radius: 10, y: 5)
+            if !model.intelligenceStatus.isEmpty {
+                Text(model.intelligenceStatus).font(.system(size: 9)).foregroundStyle(.white.opacity(0.34))
+                    .lineLimit(1).textSelection(.enabled).help(model.intelligenceStatus)
+            }
         }
-        .padding(.horizontal, 38).padding(.vertical, 18)
+        .padding(.horizontal, 32).padding(.top, 12).padding(.bottom, 16)
         .background(CompanionPalette.canvas)
     }
 
@@ -653,7 +685,7 @@ private struct TranscriptReader: View {
                     Spacer()
                     Toggle("Follow live", isOn: $followLive).toggleStyle(.checkbox).font(.system(size: 10))
                 }
-                .padding(.horizontal, 40).padding(.bottom, 13)
+                .padding(.horizontal, 32).padding(.bottom, 10)
             }
             ScrollViewReader { proxy in
                 ScrollView {
@@ -669,7 +701,7 @@ private struct TranscriptReader: View {
                         }
                         Color.clear.frame(height: 1).id("live-transcript-end")
                     }
-                    .padding(.horizontal, 28).padding(.bottom, 24)
+                    .padding(.horizontal, 20).padding(.bottom, 24)
                 }
                 .onAppear {
                     if let id = model.highlightedTranscriptID { followLive = false; proxy.scrollTo(id, anchor: .center) }
@@ -706,49 +738,44 @@ private struct TranscriptPassage: View {
     private var bookmarked: Bool { session.notes.contains { $0.transcriptID == line.id && $0.isBookmark } }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 17) {
-            VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 9) {
+                Text(line.source).font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.65)).lineLimit(1)
                 Text(line.time, format: .dateTime.hour().minute())
-                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
-                if categories.contains(.question) {
-                    Image(systemName: "questionmark.bubble").font(.system(size: 12)).foregroundStyle(.secondary)
-                } else if categories.contains(.exam) || categories.contains(.important) {
-                    Image(systemName: "asterisk").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                    .font(.system(size: 10)).foregroundStyle(.white.opacity(0.3))
+                if bookmarked {
+                    Image(systemName: "bookmark.fill").font(.system(size: 9)).foregroundStyle(.white.opacity(0.5)).help("Bookmarked")
                 }
+                Spacer(minLength: 8)
+                Menu { passageActions } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 12)).frame(width: 23, height: 18)
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+                .opacity(hovered || highlighted ? 0.85 : 0.3)
+                .help("Passage actions").accessibilityLabel("Actions for this transcript passage")
             }
-            .frame(width: 60, alignment: .leading).padding(.top, 3)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 9) {
-                    Text(line.source.uppercased()).font(.system(size: 9, weight: .semibold)).tracking(1.2)
-                        .foregroundStyle(.secondary).lineLimit(1)
-                    if bookmarked {
-                        Image(systemName: "bookmark.fill").font(.system(size: 9)).help("Bookmarked")
+            Text(line.text).font(.system(size: 14)).lineSpacing(5)
+                .foregroundStyle(.white.opacity(categories.contains(.question) ? 0.95 : 0.76))
+                .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+            if !categories.isEmpty {
+                HStack(spacing: 11) {
+                    ForEach(Array(categories.prefix(3)), id: \.rawValue) { category in
+                        MomentBadge(category: category)
                     }
-                    Spacer()
-                    Menu { passageActions } label: {
-                        Image(systemName: "ellipsis").font(.system(size: 12)).frame(width: 26, height: 18)
-                    }
-                    .menuStyle(.borderlessButton).fixedSize()
-                    .opacity(hovered || highlighted ? 1 : 0.4)
-                    .help("Passage actions").accessibilityLabel("Actions for this transcript passage")
                 }
-                Text(line.text).font(.system(size: 13)).lineSpacing(5)
-                    .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                if !categories.isEmpty {
-                    HStack(spacing: 7) {
-                        ForEach(Array(categories.prefix(3)), id: \.rawValue) { category in MomentBadge(category: category) }
-                    }
-                    .padding(.top, 2)
-                }
+                .padding(.top, 1)
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 15)
-        .background(highlighted ? Color.primary.opacity(0.065) : (hovered ? Color.primary.opacity(0.025) : .clear),
-                    in: RoundedRectangle(cornerRadius: 9))
+        .padding(.horizontal, 12).padding(.vertical, 13)
+        .background(highlighted ? Color.white.opacity(0.065) : (hovered ? Color.white.opacity(0.025) : .clear),
+                    in: RoundedRectangle(cornerRadius: 8))
+        .overlay(alignment: .leading) {
+            if highlighted { Color.white.opacity(0.5).frame(width: 1.5).padding(.vertical, 13) }
+        }
         .onHover { hovered = $0 }
         .contextMenu { passageActions }
     }
-
     @ViewBuilder private var passageActions: some View {
         Button("Ask AI about this", systemImage: "text.bubble") { model.askAbout(line, action: "Ask", sessionID: session.id) }
         Button(bookmarked ? "Remove Bookmark" : "Bookmark", systemImage: bookmarked ? "bookmark.slash" : "bookmark") {
@@ -766,9 +793,7 @@ private struct MomentBadge: View {
     let category: MomentCategory
     var body: some View {
         Label(category.rawValue, systemImage: momentSymbol(category))
-            .font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
-            .padding(.horizontal, 6).padding(.vertical, 4)
-            .background(CompanionPalette.wash, in: RoundedRectangle(cornerRadius: 4))
+            .font(.system(size: 9, weight: .medium)).foregroundStyle(.white.opacity(0.4))
     }
 }
 
@@ -798,6 +823,14 @@ private struct SummarySources: View {
 private struct CompanionNotesView: View {
     @ObservedObject var model: MeetingModel
     @State private var sessionID: UUID?
+    @State private var creating = false
+    @State private var filter: NoteFilter = .all
+    @FocusState private var noteFocused: Bool
+
+    private enum NoteFilter: String, CaseIterable, Identifiable {
+        case all = "All", notes = "Notes", bookmarks = "Bookmarks"
+        var id: String { rawValue }
+    }
     private struct NoteItem: Identifiable {
         let session: ListeningSession
         let note: SessionNote
@@ -805,223 +838,337 @@ private struct CompanionNotesView: View {
     }
     private var notes: [NoteItem] {
         model.sessions.flatMap { session in session.notes.map { NoteItem(session: session, note: $0) } }
+            .filter { filter == .all || (filter == .bookmarks ? $0.note.isBookmark : !$0.note.isBookmark) }
             .sorted { $0.note.time > $1.note.time }
     }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 25) {
-                CompanionPageHeader(eyebrow: "Keep it close", title: "Notes", subtitle: "Your thoughts, bookmarks, and things worth keeping.")
-                VStack(alignment: .leading, spacing: 12) {
-                    TextEditor(text: $model.noteDraft)
-                        .font(.system(size: 13)).scrollContentBackground(.hidden)
-                        .padding(9).frame(height: 100)
-                        .background(CompanionPalette.wash, in: RoundedRectangle(cornerRadius: 9))
-                        .overlay(alignment: .topLeading) {
-                            if model.noteDraft.isEmpty {
-                                Text("A thought worth keeping…").font(.system(size: 13)).foregroundStyle(.tertiary)
-                                    .padding(.horizontal, 14).padding(.top, 17).allowsHitTesting(false)
-                            }
-                        }
-                        .accessibilityLabel("New note")
-                    HStack {
-                        if !model.sessions.isEmpty {
-                            Picker("Attach to", selection: $sessionID) {
-                                Text("Current or most recent session").tag(Optional<UUID>.none)
-                                ForEach(model.sessions.sorted { $0.startedAt > $1.startedAt }) {
-                                    Text($0.title).tag(Optional($0.id))
-                                }
-                            }
-                            .labelsHidden().frame(maxWidth: 320).controlSize(.small)
-                            .accessibilityLabel("Session for new note")
-                        }
-                        Spacer()
-                        Button("Save Note") {
-                            model.saveNote(model.noteDraft, sessionID: sessionID)
-                            model.noteDraft = ""
-                        }
-                        .buttonStyle(.bordered).buttonBorderShape(.capsule)
-                        .disabled(model.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            VStack(alignment: .leading, spacing: 22) {
+                HStack(alignment: .top) {
+                    CompanionPageHeader(eyebrow: "Keep it close", title: "Notes", subtitle: "Thoughts and passages worth keeping.")
+                    Spacer()
+                    Button { creating = true; noteFocused = true } label: {
+                        Label("New note", systemImage: "plus").font(.system(size: 11, weight: .medium))
                     }
+                    .buttonStyle(CompanionPrimaryButtonStyle()).keyboardShortcut("n", modifiers: .command)
                 }
-                if notes.isEmpty {
-                    EmptyCompanionState(symbol: "square.and.pencil", title: "Keep the thought. Keep the context.",
-                                        message: "Write a note here or bookmark a passage in any transcript. Saved notes stay connected to their session.")
-                } else {
-                    LazyVStack(alignment: .leading, spacing: 26) {
-                        ForEach(notes) { item in
-                            VStack(alignment: .leading, spacing: 11) {
-                                HStack {
-                                    Label(item.note.isBookmark ? "Bookmark" : "Note",
-                                          systemImage: item.note.isBookmark ? "bookmark.fill" : "square.and.pencil")
-                                    Spacer()
-                                    Text(item.note.time, format: .dateTime.month(.abbreviated).day().hour().minute())
-                                }
-                                .font(.system(size: 10)).foregroundStyle(.secondary)
-                                Text(item.note.text).font(.system(size: 14)).lineSpacing(5).textSelection(.enabled)
-                                Button {
-                                    model.highlightedTranscriptID = item.note.transcriptID
-                                    model.openMain(.sessions, sessionID: item.session.id)
-                                } label: {
-                                    Label(item.session.title, systemImage: "arrow.up.right")
-                                        .font(.system(size: 11)).lineLimit(1)
-                                }
-                                .buttonStyle(.plain).foregroundStyle(.secondary)
-                            }
-                            .padding(.bottom, 21)
-                            .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.055)).frame(height: 0.5) }
-                        }
+                HStack(spacing: 21) {
+                    ForEach(NoteFilter.allCases) { item in
+                        Button { filter = item } label: {
+                            Text(item.rawValue).font(.system(size: 11, weight: filter == item ? .medium : .regular))
+                                .foregroundStyle(.white.opacity(filter == item ? 0.94 : 0.4))
+                                .padding(.bottom, 11).contentShape(Rectangle())
+                                .overlay(alignment: .bottom) { if filter == item { Color.white.opacity(0.8).frame(height: 1.5) } }
+                        }.buttonStyle(.plain).accessibilityAddTraits(filter == item ? .isSelected : [])
                     }
-                    .padding(.top, 5)
+                    Spacer()
+                    Text("\(notes.count)").font(.system(size: 10)).foregroundStyle(.white.opacity(0.3)).padding(.bottom, 11)
+                }
+                .overlay(alignment: .bottom) { CompanionHairline() }
+                if creating { noteComposer }
+                if notes.isEmpty {
+                    EmptyCompanionState(symbol: "bookmark", title: filter == .bookmarks ? "Keep a moment close." : "A space for your thoughts.",
+                                        message: filter == .bookmarks ? "Bookmark a passage in a transcript and find it here, with its original context." : "Write something down, save an answer, or keep a passage from a conversation.")
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(notes) { item in noteRow(item) }
+                    }
                 }
             }
-            .padding(.horizontal, 46).padding(.top, 52).padding(.bottom, 40)
+            .padding(.horizontal, 32).padding(.top, 24).padding(.bottom, 30)
         }
+        .onAppear { if !model.noteDraft.isEmpty { creating = true } }
+    }
+
+    private var noteComposer: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TextEditor(text: $model.noteDraft)
+                .font(.system(size: 13)).scrollContentBackground(.hidden).focused($noteFocused)
+                .padding(.horizontal, 7).padding(.top, 9).frame(height: 105)
+                .overlay(alignment: .topLeading) {
+                    if model.noteDraft.isEmpty {
+                        Text("A thought worth keeping…").font(.system(size: 13)).foregroundStyle(.white.opacity(0.3))
+                            .padding(.horizontal, 12).padding(.top, 17).allowsHitTesting(false)
+                    }
+                }
+                .accessibilityLabel("New note")
+            HStack(spacing: 12) {
+                if !model.sessions.isEmpty {
+                    Picker("Attach to", selection: $sessionID) {
+                        Text("Current or most recent session").tag(Optional<UUID>.none)
+                        ForEach(model.sessions.sorted { $0.startedAt > $1.startedAt }) {
+                            Text($0.title).tag(Optional($0.id))
+                        }
+                    }
+                    .labelsHidden().frame(maxWidth: 290).controlSize(.small)
+                    .accessibilityLabel("Session for new note")
+                }
+                Spacer()
+                Button("Close") { creating = false; noteFocused = false }
+                    .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
+                Button("Save note") {
+                    model.saveNote(model.noteDraft, sessionID: sessionID)
+                    model.noteDraft = ""
+                    creating = false
+                }
+                .buttonStyle(CompanionPrimaryButtonStyle())
+                .disabled(model.noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.horizontal, 14).padding(.bottom, 13)
+        }
+        .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(CompanionPalette.hairline, lineWidth: 0.5))
+    }
+
+    private func noteRow(_ item: NoteItem) -> some View {
+        HStack(alignment: .top, spacing: 13) {
+            Image(systemName: item.note.isBookmark ? "bookmark" : "text.alignleft")
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.32)).frame(width: 20).padding(.top, 2)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 7) {
+                    Text(item.note.isBookmark ? "Bookmark" : "Note")
+                    Text("·")
+                    Text(item.note.time, format: .dateTime.month(.abbreviated).day().hour().minute())
+                    Spacer()
+                }
+                .font(.system(size: 10)).foregroundStyle(.white.opacity(0.34))
+                Text(item.note.text).font(.system(size: 13)).lineSpacing(5)
+                    .foregroundStyle(.white.opacity(0.85)).textSelection(.enabled)
+                Button {
+                    model.highlightedTranscriptID = item.note.transcriptID
+                    model.openMain(.sessions, sessionID: item.session.id)
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(item.session.title).lineLimit(1)
+                        Image(systemName: "arrow.up.right").font(.system(size: 8))
+                    }.font(.system(size: 10))
+                }
+                .buttonStyle(.plain).foregroundStyle(.white.opacity(0.44))
+            }
+        }
+        .padding(.vertical, 20).frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) { CompanionHairline() }
     }
 }
 
 @MainActor
 private struct CompanionSearchView: View {
     @ObservedObject var model: MeetingModel
+    @State private var mode: MemoryMode = .ask
     @FocusState private var searchFocused: Bool
+
+    private enum MemoryMode: String, CaseIterable, Identifiable {
+        case ask = "Ask", search = "Search"
+        var id: String { rawValue }
+    }
+    private var query: Binding<String> {
+        Binding(get: { mode == .ask ? model.memoryQuestion : model.searchQuery },
+                set: { if mode == .ask { model.memoryQuestion = $0 } else { model.searchQuery = $0 } })
+    }
+    private var canSubmit: Bool {
+        !query.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !(mode == .ask && model.memoryIsAnswering)
+    }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
-                CompanionPageHeader(eyebrow: "Bring it back", title: "Ask your memory", subtitle: "Find the idea, even when you do not remember the exact words.")
-                VStack(alignment: .leading, spacing: 15) {
-                    HStack(alignment: .bottom, spacing: 12) {
-                        TextField("What would you like to remember?", text: $model.memoryQuestion, axis: .vertical)
-                            .textFieldStyle(.plain).font(.system(size: 15)).lineLimit(1...3)
-                            .onSubmit { askMemory() }
-                        Button { askMemory() } label: {
-                            if model.memoryIsAnswering {
-                                ProgressView().controlSize(.small).frame(width: 18, height: 18)
-                            } else {
-                                Image(systemName: "arrow.up").font(.system(size: 13, weight: .semibold)).frame(width: 18, height: 18)
-                            }
-                        }
-                        .buttonStyle(CompanionPrimaryButtonStyle())
-                        .disabled(model.memoryIsAnswering || model.memoryQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .accessibilityLabel("Ask your memory")
-                    }
-                    .padding(.leading, 17).padding(.trailing, 7).padding(.vertical, 7)
-                    .background(CompanionPalette.wash, in: RoundedRectangle(cornerRadius: 15))
-                    if model.memoryAnswer.isEmpty && !model.memoryIsAnswering {
-                        HStack(spacing: 15) {
-                            memoryPrompt("What assignments are due?")
-                            memoryPrompt("What should I review this week?")
-                        }
-                    }
+            VStack(alignment: .leading, spacing: 23) {
+                CompanionPageHeader(eyebrow: "Bring it back", title: "Ask your memory",
+                                    subtitle: "A thought, a question, something you almost remember.")
+                composer
+                if mode == .ask {
+                    if model.memoryAnswer.isEmpty && !model.memoryIsAnswering { prompts }
                     if model.memoryIsAnswering {
-                        Label("Looking through your sessions…", systemImage: "text.magnifyingglass")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    if !model.memoryAnswer.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text(memoryAnswerText(model.memoryAnswer, sources: model.memorySources))
-                                .font(.system(size: 14)).lineSpacing(6).textSelection(.enabled)
-                                .environment(\.openURL, OpenURLAction { url in
-                                    guard url.scheme == "notch-memory-source", let host = url.host, let number = Int(host),
-                                          number > 0, number <= model.memorySources.count else { return .discarded }
-                                    model.selectSearchResult(model.memorySources[number - 1])
-                                    return .handled
-                                })
-                            Button("Copy answer") { model.copyText(model.memoryAnswer) }
-                                .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary)
-                            if !model.memorySources.isEmpty {
-                                Eyebrow(text: "Sources").padding(.top, 9)
-                                ForEach(Array(model.memorySources.enumerated()), id: \.element.id) { index, source in
-                                    Button { model.selectSearchResult(source) } label: {
-                                        HStack(alignment: .top, spacing: 10) {
-                                            Text("[\(index + 1)]").font(.system(size: 10, weight: .medium, design: .monospaced))
-                                                .frame(width: 28, alignment: .leading)
-                                            VStack(alignment: .leading, spacing: 4) {
-                                                Text(source.sessionTitle).font(.system(size: 11, weight: .medium)).lineLimit(1)
-                                                Text(source.excerpt).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
-                                            }
-                                            Spacer(minLength: 0)
-                                            Image(systemName: "arrow.up.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-                                        }
-                                        .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()).padding(.vertical, 5)
-                                    }.buttonStyle(.plain)
-                                }
-                            }
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.mini)
+                            Text("Looking through your sessions…").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
                         }
-                        .padding(.vertical, 9)
                     }
+                    if !model.memoryAnswer.isEmpty { memoryAnswer }
+                } else {
+                    searchResults
                 }
-
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        Text("Search everything").font(.system(size: 14, weight: .semibold))
-                        Spacer()
-                        if !model.searchQuery.isEmpty {
-                            Text(model.searchUsesSemantic ? "Semantic + text" : "Text search")
-                                .font(.system(size: 10)).foregroundStyle(.tertiary)
-                        }
-                    }
-                    HStack(spacing: 10) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Search transcripts, questions, notes…", text: $model.searchQuery)
-                            .textFieldStyle(.plain).focused($searchFocused)
-                            .onSubmit { model.searchMemory() }
-                        if !model.searchQuery.isEmpty {
-                            Button { model.searchQuery = ""; model.searchMemory() } label: { Image(systemName: "xmark.circle.fill") }
-                                .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Clear search")
-                        }
-                    }
-                    .font(.system(size: 13)).padding(13)
-                    .background(CompanionPalette.wash, in: RoundedRectangle(cornerRadius: 9))
-                    if model.searchResults.isEmpty {
-                        EmptyCompanionState(symbol: "magnifyingglass",
-                                            title: model.searchQuery.isEmpty ? "It is all here when you need it." : "No matching passages.",
-                                            message: model.searchQuery.isEmpty ? "Search for a topic, a question, an assignment, or a remembered phrase across every session." : "Try another topic or a few different words. Only saved session content is searched.")
-                    } else {
-                        Text("\(model.searchResults.count) matching passages").font(.system(size: 10)).foregroundStyle(.tertiary)
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(model.searchResults) { result in
-                                Button { model.selectSearchResult(result) } label: {
-                                    VStack(alignment: .leading, spacing: 10) {
-                                        HStack(spacing: 7) {
-                                            Text(result.sessionTitle).fontWeight(.medium).lineLimit(1)
-                                            Text("·")
-                                            Text(result.kind)
-                                            Spacer()
-                                            Text(result.time, format: .dateTime.month(.abbreviated).day())
-                                            Image(systemName: "arrow.up.right").padding(.leading, 5)
-                                        }
-                                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                                        Text(result.excerpt).font(.system(size: 13)).lineSpacing(4).lineLimit(4)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                    }
-                                    .padding(.vertical, 18).contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .overlay(alignment: .bottom) { Rectangle().fill(Color.primary.opacity(0.055)).frame(height: 0.5) }
-                            }
-                        }
-                    }
-                }
-                .padding(.top, 8)
             }
-            .padding(.horizontal, 46).padding(.top, 52).padding(.bottom, 40)
+            .padding(.horizontal, 32).padding(.top, 24).padding(.bottom, 30)
         }
-        .onAppear { searchFocused = true }
+        .onAppear {
+            if model.memoryQuestion.isEmpty && !model.searchQuery.isEmpty { mode = .search }
+            searchFocused = true
+        }
     }
 
-    private func memoryPrompt(_ text: String) -> some View {
-        Button { model.memoryQuestion = text; askMemory() } label: {
-            Text(text).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-        }.buttonStyle(.plain)
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 3) {
+                ForEach(MemoryMode.allCases) { item in
+                    Button { mode = item; searchFocused = true } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: item == .ask ? "text.bubble" : "magnifyingglass").font(.system(size: 10))
+                            Text(item.rawValue).font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(.white.opacity(mode == item ? 0.94 : 0.4))
+                        .padding(.horizontal, 11).padding(.vertical, 7)
+                        .background(mode == item ? CompanionPalette.raised : .clear, in: Capsule())
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).accessibilityAddTraits(mode == item ? .isSelected : [])
+                }
+                Spacer()
+                Text("All sessions").font(.system(size: 10)).foregroundStyle(.white.opacity(0.3))
+            }
+            .padding(.horizontal, 12).padding(.top, 11)
+            HStack(alignment: .bottom, spacing: 12) {
+                TextField(mode == .ask ? "What would you like to remember?" : "Search transcripts, questions, notes…",
+                          text: query, axis: .vertical)
+                    .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(1...3).focused($searchFocused)
+                    .onSubmit { submit() }.padding(.vertical, 6)
+                    .accessibilityLabel(mode == .ask ? "Ask your memory" : "Search saved sessions")
+                if !query.wrappedValue.isEmpty && !(mode == .ask && model.memoryIsAnswering) {
+                    Button { query.wrappedValue = "" } label: {
+                        Image(systemName: "xmark").font(.system(size: 10)).foregroundStyle(.white.opacity(0.35))
+                            .frame(width: 20, height: 30)
+                    }.buttonStyle(.plain).accessibilityLabel("Clear query")
+                }
+                Button { submit() } label: {
+                    Group {
+                        if mode == .ask && model.memoryIsAnswering {
+                            ProgressView().controlSize(.mini).tint(.black)
+                        } else {
+                            Image(systemName: mode == .ask ? "arrow.up" : "arrow.right").font(.system(size: 12, weight: .semibold))
+                        }
+                    }
+                    .foregroundStyle(Color.black.opacity(0.85)).frame(width: 32, height: 32)
+                    .background(.white.opacity(canSubmit ? 0.95 : 0.25), in: Circle())
+                }
+                .buttonStyle(.plain).disabled(!canSubmit)
+                .accessibilityLabel(mode == .ask ? "Ask your memory" : "Search")
+                .keyboardShortcut(.return, modifiers: .command)
+            }
+            .padding(.horizontal, 18).padding(.top, 15).padding(.bottom, 17)
+            CompanionHairline().padding(.horizontal, 16)
+            HStack(spacing: 5) {
+                Image(systemName: "text.quote").font(.system(size: 9))
+                Text(mode == .ask ? "Answers stay connected to their sources." : "Transcripts, notes, questions, and saved moments.")
+                    .font(.system(size: 10))
+                Spacer()
+                ShortcutKeycap(text: "⌘↵")
+            }
+            .foregroundStyle(.white.opacity(0.3)).padding(.horizontal, 18).padding(.vertical, 11)
+        }
+        .background(CompanionPalette.surface, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(CompanionPalette.hairline, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.14), radius: 16, y: 8)
     }
 
-    private func askMemory() {
-        guard !model.memoryIsAnswering, !model.memoryQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        Task { await model.askMemory() }
+    private var prompts: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Eyebrow(text: model.sessions.isEmpty ? "Your memory starts with a conversation" : "A few things you can ask").padding(.bottom, 12)
+            memoryPrompt("What assignments are due?", symbol: "calendar")
+            memoryPrompt("What should I review this week?", symbol: "book")
+            memoryPrompt("What questions came up in my last session?", symbol: "questionmark.bubble")
+        }
+        .padding(.top, 7)
+    }
+
+    private func memoryPrompt(_ text: String, symbol: String) -> some View {
+        Button { model.memoryQuestion = text; submit() } label: {
+            HStack(spacing: 12) {
+                Image(systemName: symbol).font(.system(size: 11)).frame(width: 20).foregroundStyle(.white.opacity(0.3))
+                Text(text).font(.system(size: 12)).foregroundStyle(.white.opacity(0.56))
+                Spacer()
+                Image(systemName: "arrow.up.left").font(.system(size: 9)).foregroundStyle(.white.opacity(0.25))
+            }
+            .padding(.vertical, 13).contentShape(Rectangle())
+        }.buttonStyle(.plain).overlay(alignment: .bottom) { CompanionHairline() }
+    }
+
+    private var memoryAnswer: some View {
+        VStack(alignment: .leading, spacing: 17) {
+            HStack {
+                Eyebrow(text: "From your sessions")
+                Spacer()
+                Button { model.copyText(model.memoryAnswer) } label: {
+                    Label("Copy", systemImage: "doc.on.doc").font(.system(size: 10))
+                }.buttonStyle(.plain).foregroundStyle(.white.opacity(0.4))
+            }
+            Text(memoryAnswerText(model.memoryAnswer, sources: model.memorySources))
+                .font(.system(size: 14)).lineSpacing(6).foregroundStyle(.white.opacity(0.85)).textSelection(.enabled)
+                .environment(\.openURL, OpenURLAction { url in
+                    guard url.scheme == "notch-memory-source", let host = url.host, let number = Int(host),
+                          number > 0, number <= model.memorySources.count else { return .discarded }
+                    model.selectSearchResult(model.memorySources[number - 1])
+                    return .handled
+                })
+            if !model.memorySources.isEmpty {
+                CompanionHairline().padding(.top, 6)
+                Eyebrow(text: "Sources")
+                VStack(spacing: 14) {
+                    ForEach(Array(model.memorySources.enumerated()), id: \.element.id) { index, source in
+                        Button { model.selectSearchResult(source) } label: {
+                            HStack(alignment: .top, spacing: 11) {
+                                Text("\(index + 1)").font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.52)).frame(width: 20, height: 20)
+                                    .background(CompanionPalette.raised, in: RoundedRectangle(cornerRadius: 5))
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(source.sessionTitle).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                                    Text(source.excerpt).font(.system(size: 11)).foregroundStyle(.white.opacity(0.36)).lineLimit(2)
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "arrow.up.right").font(.system(size: 9)).foregroundStyle(.white.opacity(0.3))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(.top, 5)
+    }
+
+    @ViewBuilder private var searchResults: some View {
+        HStack {
+            Text(model.searchQuery.isEmpty ? "Search your saved conversations" : "\(model.searchResults.count) matching passages")
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.6))
+            Spacer()
+            if !model.searchQuery.isEmpty {
+                Text(model.searchUsesSemantic ? "Semantic + text" : "Text search").font(.system(size: 10)).foregroundStyle(.white.opacity(0.3))
+            }
+        }
+        if model.searchResults.isEmpty {
+            EmptyCompanionState(symbol: "magnifyingglass", title: model.searchQuery.isEmpty ? "Find your way back." : "No matching passages.",
+                                message: model.searchQuery.isEmpty ? "Search for a topic, an assignment, or a few words you remember." : "Try another topic or a few different words.")
+        } else {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(model.searchResults) { result in
+                    Button { model.selectSearchResult(result) } label: {
+                        VStack(alignment: .leading, spacing: 9) {
+                            HStack(spacing: 7) {
+                                Text(result.sessionTitle).fontWeight(.medium).foregroundStyle(.white.opacity(0.58)).lineLimit(1)
+                                Text("·")
+                                Text(result.kind)
+                                Spacer()
+                                Text(result.time, format: .dateTime.month(.abbreviated).day())
+                                Image(systemName: "arrow.up.right").font(.system(size: 9)).padding(.leading, 5)
+                            }
+                            .font(.system(size: 10)).foregroundStyle(.white.opacity(0.3))
+                            Text(result.excerpt).font(.system(size: 13)).lineSpacing(5).lineLimit(4)
+                                .foregroundStyle(.white.opacity(0.85)).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.vertical, 18).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).overlay(alignment: .bottom) { CompanionHairline() }
+                }
+            }
+        }
+    }
+
+    private func submit() {
+        guard canSubmit else { return }
+        if mode == .ask { Task { await model.askMemory() } }
+        else { model.searchMemory() }
     }
 }
-
 private struct TranscriptNoteDraft: Identifiable {
     let id = UUID()
     let sessionID: UUID
@@ -1058,44 +1205,6 @@ private struct TranscriptNoteEditor: View {
         .padding(28).frame(width: 470)
         .background(CompanionPalette.canvas)
         .onAppear { text = draft.text }
-    }
-}
-
-struct CompanionPageHeader: View {
-    var eyebrow: String
-    var title: String
-    var subtitle: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            Eyebrow(text: eyebrow)
-            Text(title).font(.system(size: 30, weight: .semibold)).tracking(-0.9).padding(.top, 6)
-            Text(subtitle).font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(3)
-        }
-    }
-}
-
-struct Eyebrow: View {
-    var text: String
-    var body: some View {
-        Text(text.uppercased()).font(.system(size: 9, weight: .medium)).tracking(1.5).foregroundStyle(.tertiary)
-    }
-}
-
-struct EmptyCompanionState: View {
-    var symbol: String
-    var title: String
-    var message: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Image(systemName: symbol).font(.system(size: 26, weight: .ultraLight))
-                .foregroundStyle(.secondary).padding(.bottom, 5)
-            Text(title).font(.system(size: 16, weight: .medium))
-            Text(message).font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(4)
-                .frame(maxWidth: 410, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 30)
     }
 }
 

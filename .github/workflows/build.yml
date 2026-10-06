@@ -14,7 +14,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Test meeting logic and response parsing
+      - name: Test listening intelligence, providers, and native layouts
+        env:
+          NOTCH_PREVIEW_DIRECTORY: ${{ github.workspace }}/dist/Previews
         run: swift test
       - name: Build and verify universal macOS app
         run: bash scripts/build-app.sh
@@ -24,3 +26,10 @@ jobs:
           path: dist/Notch-Meeting-Assistant.zip
           if-no-files-found: error
           retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Notch-Design-Previews
+          path: dist/Previews
+          if-no-files-found: warn
+          retention-days: 14

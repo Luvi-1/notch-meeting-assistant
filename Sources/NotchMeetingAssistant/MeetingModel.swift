@@ -5,8 +5,11 @@ import NotchCore
 
 @MainActor
 final class MeetingModel: ObservableObject {
-    @Published var settings = UserSettings.load() {
+    @Published var settings = UserSettings() {
         didSet {
+            #if DEBUG
+            if isPreview { return }
+            #endif
             settings.save()
             if oldValue.questionAssistance != settings.questionAssistance,
                settings.questionAssistance == .off || settings.questionAssistance == .detectOnly,
@@ -20,6 +23,8 @@ final class MeetingModel: ObservableObject {
             if oldValue.transcription.provider != settings.transcription.provider || oldValue.transcription.baseURL != settings.transcription.baseURL {
                 transcriptionModels = []
                 transcriptionModelsStatus = ""
+                transcriptionModelRequestID = UUID()
+                loadingTranscriptionModels = false
             }
         }
     }
@@ -34,7 +39,6 @@ final class MeetingModel: ObservableObject {
     @Published private(set) var activeSessionID: UUID?
     @Published private(set) var moments: [SessionMoment] = []
     @Published private(set) var currentQuestion: SessionMoment?
-    @Published var hasConsent = false
     @Published var question = ""
     @Published var meetingContext = ""
     @Published var noteDraft = ""
@@ -43,10 +47,13 @@ final class MeetingModel: ObservableObject {
     @Published var configuringProvider: AIProviderID?
     @Published private(set) var providerModels: [AIProviderID: [ProviderModel]] = [:]
     @Published private(set) var providerStatuses: [AIProviderID: String] = [:]
+    @Published private(set) var loadingProviderModels = Set<AIProviderID>()
+    @Published private(set) var checkingProviders = Set<AIProviderID>()
     @Published private(set) var transcriptionKeyStatus = ""
     @Published private(set) var transcriptionHasKey = false
     @Published private(set) var transcriptionModels: [ProviderModel] = []
     @Published private(set) var transcriptionModelsStatus = ""
+    @Published private(set) var loadingTranscriptionModels = false
     @Published private(set) var needsRecordingPermission = false
     @Published var error: String? {
         didSet {
@@ -85,6 +92,9 @@ final class MeetingModel: ObservableObject {
     var onOpenMainWindow: (() -> Void)?
 
     private var keys: [AIProviderID: String] = [:]
+    private var providerModelRequestIDs: [AIProviderID: UUID] = [:]
+    private var providerCheckRequestIDs: [AIProviderID: UUID] = [:]
+    private var transcriptionModelRequestID = UUID()
     private var capture: MeetingCapture?
     private var finishingCapture: MeetingCapture?
     private let voice = VoiceOutput()
@@ -110,6 +120,9 @@ final class MeetingModel: ObservableObject {
     private var automaticAnalysisPaused = false
     private var answerSessionID: UUID?
     private var answerTaskKind: AITask?
+    #if DEBUG
+    private var isPreview = false
+    #endif
 
     var expanded: Bool { presentation.phase == .expanded }
     var notchAnswer: String {
@@ -143,6 +156,7 @@ final class MeetingModel: ObservableObject {
     }
 
     init() {
+        settings = UserSettings.load()
         do {
             sessions = try memory.load()
             // A session interrupted by quit/crash is still reviewable after reopening.
@@ -165,6 +179,35 @@ final class MeetingModel: ObservableObject {
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
+
+    #if DEBUG
+    /// Deterministic source rendering for CI. This initializer never opens Keychain, reads session
+    /// files, installs a timer, starts capture, or creates a network request.
+    init(previewSessions: [ListeningSession], activeSessionID: UUID? = nil,
+         question: SessionMoment? = nil, answer: String = "") {
+        isPreview = true
+        settings = UserSettings()
+        sessions = previewSessions
+        self.activeSessionID = activeSessionID
+        selectedSessionID = activeSessionID ?? previewSessions.first?.id
+        let selected = previewSessions.first { $0.id == selectedSessionID }
+        transcript = TranscriptStore(lines: selected?.transcript ?? [])
+        moments = selected?.moments ?? []
+        currentQuestion = question
+        self.answer = answer
+        answerComplete = !answer.isEmpty
+        displayedAnswerSessionID = answer.isEmpty ? nil : selectedSessionID
+        answerMomentID = question?.id
+        isListening = activeSessionID != nil
+        clockNow = (selected?.startedAt ?? Date(timeIntervalSince1970: 1_791_300_000)).addingTimeInterval(12 * 60)
+        if question != nil {
+            presentation.beginAnswer()
+            // No preview timer runs, so this horizontal question state remains stable for capture.
+            // Tests can call togglePin() when they need the fully expanded notch instead.
+            presentation.reveal(at: clockNow, duration: 3_600)
+        }
+    }
+    #endif
 
     func openMain(_ destination: CompanionDestination = .home, sessionID: UUID? = nil) {
         self.destination = destination
@@ -196,7 +239,6 @@ final class MeetingModel: ObservableObject {
 
     func start() async {
         guard !isStarting, !isListening, !isStopping else { return }
-        guard hasConsent else { error = "Confirm that everyone here agrees to transcription, then start listening."; openMain(.home); return }
         cancelAnswer()
         classificationTask?.cancel()
         classificationTask = nil
@@ -274,7 +316,6 @@ final class MeetingModel: ObservableObject {
         captureID = UUID()
         isListening = false
         isStopping = false
-        hasConsent = false
         autosaveTask?.cancel()
         if let id = stoppedSession, let index = sessions.firstIndex(where: { $0.id == id }) {
             sessions[index].endedAt = Date()
@@ -733,6 +774,55 @@ final class MeetingModel: ObservableObject {
 
     func route(for task: AITask) -> ModelSelection { settings.taskModels[task.rawValue] ?? ModelSelection() }
     func setRoute(_ selection: ModelSelection, for task: AITask) { settings.taskModels[task.rawValue] = selection; automaticAnalysisPaused = false }
+    func setTranscriptionProvider(_ provider: TranscriptionProviderID) {
+        guard !isListening, !isStarting, !isStopping, provider != settings.transcription.provider else { return }
+        // A model or URL from OpenAI/custom must never follow a switch to Groq, or vice versa.
+        settings.transcription = settings.transcription.selectingProvider(provider)
+        transcriptionKeyStatus = ""
+    }
+    func resetTranscriptionConfiguration() {
+        guard !isListening, !isStarting, !isStopping else { return }
+        let current = settings.transcription
+        settings.transcription = TranscriptionConfiguration(provider: current.provider, language: current.language,
+                                                            autoDetectLanguage: current.autoDetectLanguage)
+        transcriptionModelsStatus = "Provider defaults restored."
+    }
+    func updateProviderConfiguration(_ value: ProviderConfiguration) {
+        var next = value
+        if value.id != .custom {
+            let defaults = ProviderConfiguration.defaultConfiguration(for: value.id)
+            next.baseURL = defaults.baseURL
+            // OpenCode can supply model-specific protocols through its catalogue.
+            if value.id == .openAI {
+                if value.apiProtocol != .responses && value.apiProtocol != .chatCompletions {
+                    next.apiProtocol = defaults.apiProtocol
+                }
+            } else if value.id != .openCode {
+                next.apiProtocol = defaults.apiProtocol
+            }
+        }
+        if let index = settings.providers.firstIndex(where: { $0.id == value.id }) {
+            let previous = settings.providers[index]
+            if previous.baseURL != next.baseURL || previous.apiProtocol != next.apiProtocol {
+                let existingModels = providerModels[value.id]
+                invalidateProviderRequests(value.id)
+                if value.id == .openCode && previous.baseURL == next.baseURL {
+                    providerModels[value.id] = existingModels
+                }
+                providerStatuses[value.id] = ""
+            }
+            settings.providers[index] = next
+        } else {
+            settings.providers.append(next)
+        }
+        automaticAnalysisPaused = false
+    }
+    func selectProviderModel(_ selected: ProviderModel, for provider: AIProviderID) {
+        guard var configuration = settings.providers.first(where: { $0.id == provider }) else { return }
+        configuration.model = selected.id
+        if let apiProtocol = selected.apiProtocol { configuration.apiProtocol = apiProtocol }
+        updateProviderConfiguration(configuration)
+    }
     func providerHasKey(_ id: AIProviderID) -> Bool { !(keys[id] ?? "").isEmpty }
     func providerConnected(_ id: AIProviderID) -> Bool {
         if !(keys[id] ?? "").isEmpty { return true }
@@ -766,22 +856,29 @@ final class MeetingModel: ObservableObject {
         return LLMService(configuration: config, key: keys[config.id] ?? "")
     }
     private func refreshKeyState() { hasKey = AIProviderID.allCases.contains(where: providerConnected) }
-    func saveProviderKey(_ id: AIProviderID, key: String) {
+    @discardableResult
+    func saveProviderKey(_ id: AIProviderID, key: String) -> Bool {
         do {
             try APIKeyStore.save(key, provider: id)
             keys[id] = key.trimmingCharacters(in: .whitespacesAndNewlines)
             if let index = settings.providers.firstIndex(where: { $0.id == id }) { settings.providers[index].enabled = true }
+            invalidateProviderRequests(id)
             providerStatuses[id] = "Saved securely in Keychain. Validate to check model access."
             keyDraft = ""
             refreshKeyState()
             automaticAnalysisPaused = false
-        } catch { providerStatuses[id] = error.localizedDescription }
+            return true
+        } catch {
+            providerStatuses[id] = error.localizedDescription
+            return false
+        }
     }
     func removeProviderKey(_ id: AIProviderID) {
         do {
             try APIKeyStore.remove(provider: id)
             keys[id] = ""
             if let index = settings.providers.firstIndex(where: { $0.id == id }) { settings.providers[index].enabled = false }
+            invalidateProviderRequests(id)
             providerStatuses[id] = "Credential removed."
             providerModels[id] = []
             refreshKeyState()
@@ -790,51 +887,152 @@ final class MeetingModel: ObservableObject {
     }
     func refreshProviderModels(_ id: AIProviderID) async {
         guard let config = settings.providers.first(where: { $0.id == id }) else { return }
+        let token = UUID()
+        providerModelRequestIDs[id] = token
+        loadingProviderModels.insert(id)
+        let key = keys[id] ?? ""
+        defer {
+            if providerModelRequestIDs[id] == token {
+                loadingProviderModels.remove(id)
+                providerModelRequestIDs[id] = nil
+            }
+        }
         providerStatuses[id] = "Fetching available models…"
         do {
-            let models = try await LLMService(configuration: config, key: keys[id] ?? "").getModels()
+            let models = try await LLMService(configuration: config, key: key).getModels()
+            guard providerModelRequestIDs[id] == token,
+                  settings.providers.first(where: { $0.id == id })?.baseURL == config.baseURL,
+                  settings.providers.first(where: { $0.id == id })?.apiProtocol == config.apiProtocol,
+                  (keys[id] ?? "") == key else { return }
             providerModels[id] = models
             providerStatuses[id] = "\(models.count) models available."
-        } catch { providerStatuses[id] = error.localizedDescription }
+        } catch {
+            guard providerModelRequestIDs[id] == token else { return }
+            providerStatuses[id] = error.localizedDescription
+        }
     }
     func validateProvider(_ id: AIProviderID) async {
         guard let config = settings.providers.first(where: { $0.id == id }) else { return }
+        let token = UUID()
+        providerCheckRequestIDs[id] = token
+        checkingProviders.insert(id)
+        let key = keys[id] ?? ""
+        defer {
+            if providerCheckRequestIDs[id] == token {
+                checkingProviders.remove(id)
+                providerCheckRequestIDs[id] = nil
+            }
+        }
         providerStatuses[id] = "Checking connection…"
         do {
-            try await LLMService(configuration: config, key: keys[id] ?? "").validateApiKey()
-            providerStatuses[id] = "Connected. Model execution depends on your account's access."
+            let service = LLMService(configuration: config, key: key)
+            // OpenRouter's model catalogue is public, so verify its key separately.
+            if id == .openRouter { try await service.validateApiKey() }
+            let models = try await service.getModels()
+            guard providerCheckRequestIDs[id] == token,
+                  settings.providers.first(where: { $0.id == id })?.baseURL == config.baseURL,
+                  settings.providers.first(where: { $0.id == id })?.apiProtocol == config.apiProtocol,
+                  (keys[id] ?? "") == key else { return }
+            providerModels[id] = models
+            let selectedModel = settings.providers.first(where: { $0.id == id })?.model ?? config.model
+            if id == .custom {
+                providerStatuses[id] = "Server reached. Generation depends on your endpoint's model access."
+            } else if !models.contains(where: { $0.id == selectedModel }) {
+                providerStatuses[id] = "Connection verified. The selected model is not listed; choose an available model."
+            } else {
+                providerStatuses[id] = "Connection verified. Selected model is listed; generation still depends on account access and credit."
+            }
             automaticAnalysisPaused = false
-        } catch { providerStatuses[id] = error.localizedDescription }
+        } catch {
+            guard providerCheckRequestIDs[id] == token else { return }
+            providerStatuses[id] = error.localizedDescription
+        }
     }
     func resetProvider(_ id: AIProviderID) {
         guard let index = settings.providers.firstIndex(where: { $0.id == id }) else { return }
+        let wasConnected = providerConnected(id)
         settings.providers[index] = ProviderConfiguration.defaultConfiguration(for: id)
-        settings.providers[index].enabled = providerConnected(id)
+        settings.providers[index].enabled = wasConnected
+        invalidateProviderRequests(id)
+        providerStatuses[id] = "Provider defaults restored. Your saved key is unchanged."
+        automaticAnalysisPaused = false
+    }
+    private func invalidateProviderRequests(_ id: AIProviderID) {
+        providerModelRequestIDs[id] = UUID()
+        providerCheckRequestIDs[id] = UUID()
+        loadingProviderModels.remove(id)
+        checkingProviders.remove(id)
         providerModels[id] = []
+        let usesKey = (id == .groq && settings.transcription.provider == .groq) ||
+            (id == .openAI && settings.transcription.provider == .openAI)
+        if usesKey {
+            transcriptionModelRequestID = UUID()
+            loadingTranscriptionModels = false
+            transcriptionModels = []
+            transcriptionModelsStatus = ""
+        }
     }
     func saveKey() { saveProviderKey(.openAI, key: keyDraft); keyStatus = providerStatuses[.openAI] ?? "" }
     func removeKey() { removeProviderKey(.openAI); keyDraft = ""; keyStatus = providerStatuses[.openAI] ?? "" }
-    func saveTranscriptionKey(_ key: String) {
-        do { try APIKeyStore.saveTranscriptionKey(key); transcriptionHasKey = true; transcriptionKeyStatus = "Saved securely in Keychain." }
-        catch { transcriptionKeyStatus = error.localizedDescription }
+    @discardableResult
+    func saveTranscriptionKey(_ key: String) -> Bool {
+        do {
+            try APIKeyStore.saveTranscriptionKey(key)
+            transcriptionHasKey = true
+            transcriptionKeyStatus = "Saved securely in Keychain."
+            transcriptionModelRequestID = UUID()
+            loadingTranscriptionModels = false
+            transcriptionModels = []
+            transcriptionModelsStatus = ""
+            return true
+        } catch {
+            transcriptionKeyStatus = error.localizedDescription
+            return false
+        }
     }
     func removeTranscriptionKey() {
-        do { try APIKeyStore.removeTranscriptionKey(); transcriptionHasKey = false; transcriptionKeyStatus = "Credential removed." }
+        do {
+            try APIKeyStore.removeTranscriptionKey()
+            transcriptionHasKey = false
+            transcriptionKeyStatus = "Credential removed."
+            transcriptionModelRequestID = UUID()
+            loadingTranscriptionModels = false
+            transcriptionModels = []
+            transcriptionModelsStatus = ""
+        }
         catch { transcriptionKeyStatus = error.localizedDescription }
     }
     func refreshTranscriptionModels() async {
-        let selectedProvider = settings.transcription.provider
-        guard selectedProvider != .auto, selectedProvider != .apple else { return }
+        let configuration = settings.transcription
+        guard configuration.provider != .auto, configuration.provider != .apple else { return }
+        let token = UUID()
+        transcriptionModelRequestID = token
+        loadingTranscriptionModels = true
+        defer {
+            if transcriptionModelRequestID == token { loadingTranscriptionModels = false }
+        }
         transcriptionModelsStatus = "Fetching speech models…"
         do {
-            let (configuration, key) = try transcriptionOptions()
+            // Listing models must still work when a mistyped model is the setting being repaired.
+            // No audio is sent and on-device-only does not prevent reading a provider catalogue.
+            let key = try transcriptionCredential(for: configuration.provider)
             let models = try await HTTPTranscriptionProvider(configuration: configuration, key: key).getModels()
-            guard settings.transcription.provider == selectedProvider else { return }
+            guard transcriptionModelRequestID == token,
+                  settings.transcription.provider == configuration.provider,
+                  settings.transcription.baseURL == configuration.baseURL else { return }
             transcriptionModels = models
             transcriptionModelsStatus = "\(models.count) speech models available."
         } catch {
-            guard settings.transcription.provider == selectedProvider else { return }
+            guard transcriptionModelRequestID == token else { return }
             transcriptionModelsStatus = error.localizedDescription
+        }
+    }
+    private func transcriptionCredential(for provider: TranscriptionProviderID) throws -> String {
+        switch provider {
+        case .groq: return keys[.groq] ?? ""
+        case .openAI: return keys[.openAI] ?? ""
+        case .localWhisper, .custom: return try APIKeyStore.loadTranscriptionKey()
+        default: return ""
         }
     }
     private func transcriptionOptions() throws -> (TranscriptionConfiguration, String) {
@@ -845,13 +1043,7 @@ final class MeetingModel: ObservableObject {
         if settings.onDeviceOnly, config.provider != .localWhisper {
             throw AssistantError("On-device only is enabled. Choose Apple on-device transcription or a Local Whisper server.")
         }
-        let key: String
-        switch config.provider {
-        case .groq: key = keys[.groq] ?? ""
-        case .openAI: key = keys[.openAI] ?? ""
-        case .localWhisper, .custom: key = try APIKeyStore.loadTranscriptionKey()
-        default: key = ""
-        }
+        let key = try transcriptionCredential(for: config.provider)
         // Validate request configuration before acquiring microphone/system audio.
         let silentWAV = AudioChunker.wav(samples: Array(repeating: 0, count: 8_000), sampleRate: 16_000)
         _ = try HTTPTranscriptionProvider(configuration: config, key: key).makeRequest(wavData: silentWAV)

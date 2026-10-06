@@ -18,7 +18,7 @@ GitHub Actions tests the core and preference migration, then packages a universa
 
 ## The experience
 
-**Home** has a dominant Start Listening action, recent sessions and a Continue Reviewing entry. Confirm that the people involved agree to transcription. A new installation listens through the microphone; system audio is independently optional. No Meeting / Lecture / Conversation picker blocks capture.
+**Home** is a compact charcoal command surface with a dominant Start Listening action, recent sessions and a Continue Reviewing entry. Simple top navigation replaces the permanent sidebar. A new installation listens through the microphone; system audio is independently optional. Start Listening begins capture without an agreement checkbox or a Meeting / Lecture / Conversation picker. macOS still handles microphone, Speech and system-audio permissions where required.
 
 Starting hides the main window and leaves a small black indicator by the physical notch. On displays without a camera cutout it becomes a floating pill. A detected question reveals a shallow, horizontally expanded surface with the question, an optional short answer and Answer / Save / Expand controls. Answer stays at the notch; Expand opens the dedicated review window. Other moments are collected silently. Previews expire, explicit dismissal is respected, pinning holds the preview, and Reduce Motion disables animated transitions.
 
@@ -72,6 +72,14 @@ Settings → AI Providers supports:
 
 Model IDs shown initially are suggestions, not a fixed catalogue. Fetch models or enter the ID available to your account. OpenCode models use different wire protocols; select the matching protocol if model metadata does not identify it. A successful catalogue/endpoint check does not guarantee generation access, credit or model availability.
 
+### Groq connection setup and recovery
+
+Groq uses the base URL `https://api.groq.com/openai/v1`. Language models use `POST /chat/completions`, speech models use `POST /audio/transcriptions`, and model discovery uses `GET /models`, all relative to that base. The default language model is `llama-3.3-70b-versatile`; the default transcription model is `whisper-large-v3-turbo`.
+
+Settings separates **AI providers → Groq** from **Transcription → Groq Whisper**. Built-in connections use their provider defaults; custom servers have separate configuration. Changing the speech provider resets its provider-specific URL and model while retaining language preferences. Existing recognizable OpenAI/Groq leftovers migrate automatically. Common pasted Groq root and full-operation URLs are normalized so paths cannot be duplicated. Unknown hosts and unsafe URLs fail before credentials are sent.
+
+If an older saved configuration still fails, use **Restore defaults** in Groq's provider settings and **Restore provider defaults** in Transcription, then fetch the relevant models. Check any explicit Groq overrides in **Task models** as well. A 404 now identifies whether model discovery, language generation, or transcription failed. A model-list connection check sends no completion model, so a failure there is distinct from selecting an unavailable generation model.
+
 Assign separate providers and models to **question detection**, **live question answering**, **session summaries**, **deep analysis** and **quick commands**. Auto chooses among enabled, configured providers with task-specific preferences and their selected models. Explicit assignments fail clearly when unavailable; the app does not silently send a failed request to a different provider.
 
 Credentials are stored in **macOS Keychain** and are never loaded into the editable key fields. Saved provider settings and session JSON contain no API keys. Groq/OpenAI transcription uses the corresponding provider credential; custom transcription has a separate Keychain entry. Network sessions are ephemeral, credentials cannot follow redirects, and nonlocal endpoints require HTTPS. Local Whisper is restricted to loopback.
@@ -86,7 +94,9 @@ Microphone-only use does not request system-audio capture. Selecting System audi
 
 ## Verification and practical limits
 
-Tests use deterministic fixtures and temporary session folders. They cover provider request formats and SSE completion, credential/endpoint validation, speech chunk boundaries and finalization, anonymous speaker segments and metadata fallback, unpunctuated questions, partial revisions, multiple questions per segment, stale moments, source validation, unsupported dates, bounded contexts, full-session persistence, calendar search and preference migration. No test sends a paid generation request.
+Tests use deterministic fixtures and temporary session folders. They cover provider request formats and SSE completion, credential/endpoint validation, Groq routing and saved-settings repairs, speech chunk boundaries and finalization, anonymous speaker segments and metadata fallback, unpunctuated questions, partial revisions, multiple questions per segment, stale moments, source validation, unsupported dates, bounded contexts, full-session persistence, calendar search and preference migration. No test sends a paid generation request.
+
+CI also renders the actual SwiftUI Home, transcript, review, notes, memory, provider settings and notch views into the **Notch-Design-Previews** artifact. These use fictional in-memory fixtures through a debug-only initializer that skips Keychain, stored sessions, timers, capture and network access. To reproduce on a development Mac, run `NOTCH_PREVIEW_DIRECTORY="$PWD/dist/Previews" swift test --filter DesignPreviewTests`. See [design notes](docs/DESIGN.md) for the reference study and visual decisions.
 
 Compilation and packaging do not verify real microphone acoustics, third-party model access, physical-notch positioning, or animation quality on a user's display. Those require an interactive macOS run. Real-time accuracy depends on the audio source, language, selected provider and network. Semantic classification and source citations reduce avoidable mistakes but cannot establish that every generated explanation is correct. The app cannot see a classroom board or infer an unspecified diagram from audio alone.
 

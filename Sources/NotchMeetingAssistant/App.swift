@@ -14,6 +14,10 @@ struct NotchMeetingAssistantApp: App {
                     Button("Settings…") { delegate.openSettingsFromCommand() }
                         .keyboardShortcut(",", modifiers: .command)
                 }
+                CommandGroup(after: .newItem) {
+                    Button("Start or Stop Listening") { delegate.toggleListeningFromCommand() }
+                        .keyboardShortcut("l", modifiers: [.command, .shift])
+                }
             }
     }
 }
@@ -91,15 +95,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func makeCompanionWindow() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 760),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         window.title = "Notch"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unified
-        window.backgroundColor = .windowBackgroundColor
-        window.minSize = NSSize(width: 900, height: 620)
+        window.backgroundColor = NSColor(calibratedWhite: 23 / 255, alpha: 1)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.minSize = NSSize(width: 820, height: 620)
         window.isReleasedWhenClosed = false
         window.isMovableByWindowBackground = true
         window.delegate = self
@@ -184,6 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func openSettingsFromCommand() { model.openMain(.settings) }
+    func toggleListeningFromCommand() { toggleListening() }
 
     @objc private func showCompanion() { model.openMain() }
     @objc private func showSettings() { model.openMain(.settings) }
@@ -192,8 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func answerNow() { model.answerCurrentQuestion() }
     @objc private func toggleListening() {
         if model.isListening || model.isStarting { Task { await finishListeningSession(model) } }
-        else if model.hasConsent { Task { await model.start() } }
-        else { model.openMain(.home) }
+        else { Task { await model.start() } }
     }
     @objc private func quit() { NSApp.terminate(nil) }
 
