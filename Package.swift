@@ -8,7 +8,8 @@ let package = Package(
     targets: [
         .target(name: "NotchCore"),
         .executableTarget(name: "NotchMeetingAssistant", dependencies: ["NotchCore"]),
-        .testTarget(name: "NotchCoreTests", dependencies: ["NotchCore"])
+        .testTarget(name: "NotchCoreTests", dependencies: ["NotchCore"]),
+        .testTarget(name: "NotchAppTests", dependencies: ["NotchMeetingAssistant", "NotchCore"])
     ],
     swiftLanguageVersions: [.v5]
 )

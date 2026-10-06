@@ -3,15 +3,15 @@
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>NotchMeetingAssistant</string>
 <key>CFBundleIdentifier</key><string>com.luvi.notchmeetingassistant</string>
-<key>CFBundleName</key><string>Notch Meeting Assistant</string>
-<key>CFBundleDisplayName</key><string>Notch Meeting Assistant</string>
+<key>CFBundleName</key><string>Notch</string>
+<key>CFBundleDisplayName</key><string>Notch</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSMicrophoneUsageDescription</key><string>Include your voice in the live meeting transcript when you enable the microphone.</string>
-<key>NSSpeechRecognitionUsageDescription</key><string>Turn meeting audio into a live transcript. Apple may process audio remotely unless you select on-device recognition.</string>
-<key>NSAudioCaptureUsageDescription</key><string>Transcribe meeting audio while the visible listening indicator is active.</string>
+<key>NSMicrophoneUsageDescription</key><string>Transcribe lectures, classes and conversations while you are listening. The visible notch shows when capture is active.</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>Turn speech into a live transcript. Apple may process audio remotely unless you select on-device recognition.</string>
+<key>NSAudioCaptureUsageDescription</key><string>Transcribe audio from your selected apps while the visible listening indicator is active.</string>
 </dict></plist>

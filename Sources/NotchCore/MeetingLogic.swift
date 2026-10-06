@@ -12,16 +12,23 @@ public enum OutputMode: String, CaseIterable, Codable, Identifiable {
     public var usesVoice: Bool { self != .text }
 }
 
-public struct TranscriptLine: Identifiable, Equatable {
+public struct TranscriptLine: Identifiable, Equatable, Codable {
     public let id: UUID
     public let source: String
     public var text: String
     public let time: Date
+
+    public init(id: UUID = UUID(), source: String, text: String, time: Date = Date()) {
+        self.id = id
+        self.source = source
+        self.text = text
+        self.time = time
+    }
 }
 
-public struct TranscriptStore {
+public struct TranscriptStore: Codable {
     public private(set) var lines: [TranscriptLine] = []
-    public init() {}
+    public init(lines: [TranscriptLine] = []) { self.lines = Array(lines.suffix(120)) }
 
     // Speech results replace the same recognition segment; they do not append duplicates.
     @discardableResult
