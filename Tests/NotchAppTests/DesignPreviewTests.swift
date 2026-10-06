@@ -42,6 +42,9 @@ final class DesignPreviewTests: XCTestCase {
         model.setTranscriptionProvider(.groq)
         try await render(ProviderSettingsView(model: model, initialTab: .transcription), size: size,
                          name: "12-groq-transcription", output: output)
+        model.settings.onDeviceOnly = true
+        try await render(ProviderSettingsView(model: model, initialTab: .transcription), size: size,
+                         name: "13-groq-local-restriction", output: output)
 
         var liveSession = sessions[0]
         liveSession.endedAt = nil
@@ -50,9 +53,9 @@ final class DesignPreviewTests: XCTestCase {
                                 question: question, answer: "People have more time to find alternatives, so demand becomes more elastic.")
         live.cutoutWidth = 185
         live.cutoutHeight = 34
-        live.panelWidth = 690
+        live.panelWidth = 650
         live.panelHeight = 120
-        try await render(NotchView(model: live), size: NSSize(width: 690, height: 120),
+        try await render(NotchView(model: live), size: NSSize(width: 650, height: 120),
                          name: "09-question-notch", output: output)
         live.collapse()
         live.panelWidth = 329
@@ -78,6 +81,7 @@ final class DesignPreviewTests: XCTestCase {
         10. Compact listening indicator
         11. AI provider list
         12. Groq transcription settings
+        13. Groq with an existing local-only preference
 
         These images verify rendered layout. They do not test live audio or physical-notch placement.
         """

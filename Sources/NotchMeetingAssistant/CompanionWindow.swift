@@ -145,7 +145,7 @@ private struct CompanionHomeView: View {
     @ObservedObject var model: MeetingModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var recent: [ListeningSession] { Array(model.sessions.sorted { $0.startedAt > $1.startedAt }.prefix(3)) }
+    private var recent: [ListeningSession] { Array(model.sessions.sorted { $0.startedAt > $1.startedAt }.prefix(2)) }
     private var busy: Bool { model.isListening || model.isStarting || model.isStopping }
     private var reviewSession: ListeningSession? {
         model.sessions.sorted { $0.startedAt > $1.startedAt }.first {
@@ -290,7 +290,7 @@ private struct CompanionHomeView: View {
                     } else {
                         Text("Every kind of conversation.").font(.system(size: 11)).foregroundStyle(.white.opacity(0.65))
                     }
-                    Text(audioLabel).font(.system(size: 10)).foregroundStyle(.white.opacity(0.3)).lineLimit(1)
+                    Text(audioLabel).font(.system(size: 10)).foregroundStyle(.white.opacity(0.44)).lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 if !busy { ShortcutKeycap(text: "⌘⇧L") }
@@ -814,7 +814,7 @@ private struct SummarySources: View {
                 Label(ids.count == 1 ? "View source" : "View \(ids.count) sources", systemImage: "text.quote")
                     .font(.system(size: 10))
             }
-            .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary)
+            .menuStyle(.borderlessButton).controlSize(.mini).fixedSize().foregroundStyle(.secondary)
         }
     }
 }

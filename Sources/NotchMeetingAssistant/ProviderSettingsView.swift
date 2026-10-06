@@ -74,11 +74,15 @@ struct ProviderSettingsView: View {
     private var audioSettings: some View {
         SettingsSection(title: "Audio sources", detail: "Listen to the room, your Mac, or both.") {
             VStack(spacing: 0) {
-                Toggle("Microphone", isOn: $model.settings.includeMicrophone)
-                    .toggleStyle(.switch).controlSize(.small).frame(minHeight: 38)
+                SettingsValueRow("Microphone") {
+                    Toggle("Microphone", isOn: $model.settings.includeMicrophone)
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                }
                 settingsDivider
-                Toggle("System audio", isOn: $model.settings.captureSystemAudio)
-                    .toggleStyle(.switch).controlSize(.small).frame(minHeight: 38)
+                SettingsValueRow("System audio") {
+                    Toggle("System audio", isOn: $model.settings.captureSystemAudio)
+                        .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                }
                 if model.settings.captureSystemAudio {
                     settingsDivider
                     SettingsValueRow("Audio from") {
@@ -202,12 +206,21 @@ struct ProviderSettingsView: View {
                                  ? "Short audio clips are transcribed by your local Whisper server."
                                  : "Short audio clips are sent to this provider. The transcript updates as each clip completes.")
                 }
-                settingsDivider
-                Toggle("Keep speech recognition on this Mac", isOn: $model.settings.onDeviceOnly)
-                    .toggleStyle(.switch).controlSize(.small).frame(minHeight: 36)
-                settingsHint(model.settings.onDeviceOnly
-                             ? "Requires Apple on-device recognition or Local Whisper. AI answers still use your configured providers."
-                             : "Apple Speech may process audio remotely. AI features use selected transcript passages.")
+                if usesAppleSpeech {
+                    settingsDivider
+                    Toggle("Keep speech recognition on this Mac", isOn: $model.settings.onDeviceOnly)
+                        .toggleStyle(.switch).controlSize(.small).frame(minHeight: 36)
+                    settingsHint(model.settings.onDeviceOnly
+                                 ? "Requires Apple on-device speech recognition. AI answers still use your configured providers."
+                                 : "Apple Speech may process audio remotely. AI features use selected transcript passages.")
+                } else if model.settings.onDeviceOnly && model.settings.transcription.provider != .localWhisper {
+                    settingsDivider
+                    SettingsValueRow("Require local transcription") {
+                        Toggle("Require local transcription", isOn: $model.settings.onDeviceOnly)
+                            .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    }
+                    settingsHint("Turn this off to use \(model.settings.transcription.provider.displayName), or choose Apple Speech or Local Whisper.")
+                }
             }
             .font(.system(size: 12))
             .disabled(audioIsBusy)
@@ -229,7 +242,7 @@ struct ProviderSettingsView: View {
                         Button(entry.name) { model.settings.transcription.model = entry.id }
                     }
                 } label: { Image(systemName: "chevron.down") }
-                .menuStyle(.borderlessButton).fixedSize()
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .disabled(defaultSpeechModel.isEmpty && model.transcriptionModels.isEmpty)
                 .accessibilityLabel("Choose speech model")
             }
@@ -488,7 +501,7 @@ struct ProviderConfigurationView: View {
                             Button(entry.name) { model.selectProviderModel(entry, for: provider) }
                         }
                     } label: { Image(systemName: "chevron.down") }
-                    .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Choose answering model")
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().accessibilityLabel("Choose answering model")
                 }
             }
             HStack {
@@ -574,7 +587,7 @@ private struct TaskModelSettingsRow: View {
                                 Button("Use provider default") { modelName.wrappedValue = "" }
                                 ForEach(models) { entry in Button(entry.name) { modelName.wrappedValue = entry.id } }
                             } label: { Image(systemName: "chevron.down") }
-                            .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Choose model for \(task.displayName)")
+                            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().accessibilityLabel("Choose model for \(task.displayName)")
                         }
                     }
                     if !model.providerConnected(selected) || model.settings.providers.first(where: { $0.id == selected })?.enabled != true {

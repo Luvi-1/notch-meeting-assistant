@@ -62,7 +62,7 @@ Settings → AI Providers supports:
 
 | Provider | API integration |
 | --- | --- |
-| OpenAI | Responses API, including the existing explicit Astra / Ultrafast option. |
+| OpenAI | Responses API or Chat Completions, including the existing explicit Astra / Ultrafast option for Responses. |
 | Anthropic | Native Messages API and streaming text events. |
 | Google Gemini | Native `generateContent` / `streamGenerateContent`, API-key header and model discovery. |
 | OpenRouter | Compatible chat plus model discovery and its authenticated key check. |
