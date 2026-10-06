@@ -4,6 +4,8 @@ import NotchCore
 @MainActor
 struct LibraryView: View {
     @ObservedObject var model: MeetingModel
+    @Environment(\.colorScheme) private var colorScheme
+    private var navigationInk: Color { colorScheme == .dark ? Color.white.opacity(0.86) : Color.black.opacity(0.8) }
     var body: some View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 22) {
@@ -13,16 +15,14 @@ struct LibraryView: View {
                 }.padding(.horizontal, 18).padding(.top, 24)
                 List(selection: Binding<MeetingModel.Destination?>(get: { model.destination }, set: { if let value = $0 { model.destination = value } })) {
                     ForEach(MeetingModel.Destination.allCases.filter { $0 != .settings }) { destination in
-                        Label(destination.rawValue, systemImage: destination.symbol).padding(.vertical, 7).tag(destination)
+                        navigationRow(destination).tag(destination)
                     }
-                    Section {
-                        Label("Settings", systemImage: "slider.horizontal.3").padding(.vertical, 7).tag(MeetingModel.Destination.settings)
-                    }
+                    Section { navigationRow(.settings).tag(MeetingModel.Destination.settings) }
                 }.listStyle(.sidebar)
                 if model.busyListening {
                     Button { model.showCurrentSession() } label: {
                         HStack(spacing: 9) {
-                            WaveformMark(level: model.audioLevel, active: model.isListening)
+                            WaveformMark(level: model.audioLevel, active: model.isListening && !model.isSpeaking)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(model.status).font(.system(size: 11, weight: .medium)).lineLimit(1)
                                 Text(model.elapsed).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
@@ -73,6 +73,15 @@ struct LibraryView: View {
         .tint(.primary)
         .frame(minWidth: 780, minHeight: 540)
     }
+    private func navigationRow(_ destination: MeetingModel.Destination) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: destination.symbol).frame(width: 17).foregroundStyle(navigationInk)
+            Text(destination.rawValue).foregroundStyle(navigationInk)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 13)).padding(.vertical, 7).contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
     private var home: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
@@ -87,7 +96,7 @@ struct LibraryView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     if model.busyListening {
                         HStack(spacing: 18) {
-                            WaveformMark(level: model.audioLevel, active: model.isListening).scaleEffect(1.5).frame(width: 34)
+                            WaveformMark(level: model.audioLevel, active: model.isListening && !model.isSpeaking).scaleEffect(1.5).frame(width: 34)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(model.status).font(.system(size: 20, weight: .medium))
                                 Text(model.elapsed).monospacedDigit().foregroundStyle(.secondary)
@@ -202,7 +211,7 @@ struct LibraryView: View {
                     Button("Ask", systemImage: "arrow.up") { model.askMemory() }
                         .disabled(model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isAskingMemory)
                 }.padding(14).background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
-                Text(model.semanticSearchAvailable ? "Search combines on-device semantic matching with exact words. Ask uses your selected AI provider and links back to the evidence." : "On-device semantic embeddings are unavailable for this Mac's current model resources. Exact-word search works; Ask uses the retrieved excerpts.")
+                Text(model.semanticSearchAvailable ? "Search combines on-device semantic matching, where available for the query language, with exact words. Ask uses your selected AI provider and links back to the evidence." : "On-device semantic embeddings are unavailable for this Mac's current model resources. Exact-word search works; Ask uses the retrieved excerpts.")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 if !model.memoryAnswer.isEmpty {
                     VStack(alignment: .leading, spacing: 16) {
