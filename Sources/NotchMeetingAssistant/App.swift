@@ -51,9 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(.separator())
         addItem("Quit Notch", action: #selector(quit), to: menu, key: "q")
         item.menu = menu; statusItem = item
-        stateObserver = model.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.updatePanel() }
-        }
+        stateObserver = model.objectWillChange.sink { [weak self] _ in DispatchQueue.main.async { self?.updatePanel() } }
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.updatePanel(animate: false) } }
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification,
@@ -63,8 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         updatePanel(animate: false); panel.orderFrontRegardless()
         if !UserDefaults.standard.bool(forKey: "companion-onboarding-shown") {
-            UserDefaults.standard.set(true, forKey: "companion-onboarding-shown")
-            openLibrary()
+            UserDefaults.standard.set(true, forKey: "companion-onboarding-shown"); openLibrary()
         }
     }
     private func addItem(_ title: String, action: Selector, to menu: NSMenu, key: String = "") {
@@ -80,8 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.contentView = NSHostingView(rootView: LibraryView(model: model))
             window.center(); library = window
         }
-        library?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        library?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     private func updatePanel(animate: Bool = true) {
         guard let panel, let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) ?? NSScreen.main else { return }
@@ -94,15 +90,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let width: CGFloat
         let wantedHeight: CGFloat
         switch model.presentation.phase {
-        case .compact:
-            width = detached ? 206 : cutout + 164
-            wantedHeight = barHeight
-        case .preview:
-            width = max(640, cutout + 260)
-            wantedHeight = barHeight + 92
-        case .expanded:
-            width = max(360, cutout + 164)
-            wantedHeight = barHeight + 164
+        case .compact: width = detached ? 206 : cutout + 164; wantedHeight = barHeight
+        case .preview: width = max(640, cutout + 260); wantedHeight = barHeight + 92
+        case .expanded: width = max(360, cutout + 164); wantedHeight = barHeight + 164
         }
         let fittedWidth = min(width, screen.frame.width - 24)
         let height = min(wantedHeight, screen.frame.height - 36)
@@ -110,7 +100,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if model.cutoutWidth != cutout { model.cutoutWidth = cutout }
         if model.cutoutHeight != barHeight { model.cutoutHeight = barHeight }
         if model.detachedNotch != detached { model.detachedNotch = detached }
-        // Compare destination frames so transcript tokens and level updates cannot restart an animation.
         if targetFrame != frame {
             let shouldAnimate = animate && targetFrame != .zero && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             targetFrame = frame; model.panelWidth = fittedWidth; model.panelHeight = height
@@ -136,8 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func stopListening() { Task { await model.stop() } }
     @objc private func quit() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
-        Task { await model.shutdown(); NSApp.reply(toApplicationShouldTerminate: true) }
+        Task {
+            let saved = await model.shutdown()
+            if saved, let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+            NSApp.reply(toApplicationShouldTerminate: saved)
+        }
         return .terminateLater
     }
 }
