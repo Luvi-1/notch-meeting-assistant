@@ -1,8 +1,5 @@
 name: Build macOS app
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
+on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 concurrency:
@@ -14,13 +11,23 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Test meeting logic and response parsing
+        with:
+          persist-credentials: false
+      - name: Test providers, sessions, model state and native views
         run: swift test
+        env:
+          NOTCH_PREVIEW_DIR: ${{ github.workspace }}/dist/previews
       - name: Build and verify universal macOS app
         run: bash scripts/build-app.sh
       - uses: actions/upload-artifact@v4
         with:
           name: Notch-Meeting-Assistant
           path: dist/Notch-Meeting-Assistant.zip
-          if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Notch-Native-Previews
+          path: dist/previews
+          if-no-files-found: ignore
+          retention-days: 14
