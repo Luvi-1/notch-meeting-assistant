@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import ScreenCaptureKit
+import UniformTypeIdentifiers
 import NotchCore
 
 @MainActor
@@ -22,7 +23,7 @@ final class MeetingModel: ObservableObject {
         didSet {
             settings.save()
             if oldValue.questionAssistance != settings.questionAssistance {
-                cancelAnalysis()
+                cancelAnalysis(); pendingQuestion = nil
                 if settings.questionAssistance == .off || settings.questionAssistance == .detect { cancelAnswer() }
             }
             if oldValue.outputMode != settings.outputMode && !settings.outputMode.usesVoice { stopVoice() }
@@ -51,6 +52,7 @@ final class MeetingModel: ObservableObject {
     @Published private(set) var answer = ""
     @Published private(set) var answerSessionID: UUID?
     @Published private(set) var notice: SessionQuestion?
+    @Published private(set) var noticeSessionID: UUID?
     @Published private(set) var isSpeaking = false
     @Published private(set) var audioLevel = 0.0
     @Published private(set) var elapsed = "00:00"
@@ -99,13 +101,15 @@ final class MeetingModel: ObservableObject {
     private var lastAnalysisAt = Date.distantPast
     private var lastLevelAt = Date.distantPast
     private var persistedIDs: Set<UUID> = []
-    private var actualTranscription: TranscriptionService = .apple
-    private var automaticAnswer = false
+    private var isShuttingDown = false
+    private var pendingQuestion: (sessionID: UUID, question: SessionQuestion)?
+    private var answerQuestionID: UUID?
 
     var activeSession: ListeningSession? { sessions.first { $0.id == activeSessionID } }
     var selectedSession: ListeningSession? { sessions.first { $0.id == selectedSessionID } }
     var expanded: Bool { presentation.phase == .expanded }
     var busyListening: Bool { isStarting || isListening || isStopping }
+    var previewAnswer: String { notice == nil || answerQuestionID == notice?.id ? answer : (notice?.answer ?? "") }
     var availableProviders: Set<AIProvider> {
         var available = keyedProviders
         if let custom = settings.providers.first(where: { $0.provider == .custom }),
@@ -123,28 +127,29 @@ final class MeetingModel: ObservableObject {
         return "Ready when you are"
     }
     var canAnswer: Bool {
-        !isStarting && !isStopping && !isAnswering &&
-        (!question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || notice != nil || !(selectedSession ?? activeSession)?.segments.isEmpty == true)
+        let hasTranscript = (selectedSession ?? activeSession)?.segments.isEmpty == false
+        return !isStarting && !isStopping && !isAnswering &&
+            (!question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || notice != nil || hasTranscript)
     }
-    var resolvedTranscriptionLabel: String {
-        let provider = settings.transcription.provider == .automatic ? (keyedProviders.contains(.groq) ? TranscriptionService.groq : .apple) : settings.transcription.provider
-        return provider.rawValue
+    var resolvedTranscriptionService: TranscriptionService {
+        if settings.transcription.provider != .automatic { return settings.transcription.provider }
+        return !settings.onDeviceOnly && keyedProviders.contains(.groq) ? .groq : .apple
     }
+    var resolvedTranscriptionLabel: String { resolvedTranscriptionService.rawValue }
     var dataFlowLabel: String {
         let source = [settings.includeMicrophone ? "Microphone" : nil, settings.captureSystemAudio ? "System audio" : nil].compactMap { $0 }.joined(separator: " + ")
-        let speech = resolvedTranscriptionLabel
-        return "\(source.isEmpty ? "Choose an audio input" : source) · \(speech) · \(settings.saveSessions ? "Sessions saved on this Mac" : "This session stays in memory")"
+        return "\(source.isEmpty ? "Choose an audio input" : source) · \(resolvedTranscriptionLabel) · \(settings.saveSessions ? "Sessions saved on this Mac" : "This session stays in memory")"
     }
     var aiDataFlowLabel: String {
         let names = Set(AITask.allCases.compactMap { try? settings.configuration(for: $0, available: availableProviders).provider.title }).sorted()
         return names.isEmpty ? "Connect a provider for question help and summaries." : "Selected transcript excerpts go to \(names.joined(separator: ", ")) for AI assistance."
     }
 
-    init(directory: URL? = nil) {
+    init(directory: URL? = nil, readCredentials: Bool = true) {
         let folder = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Notch/Sessions", isDirectory: true)
         repository = SessionRepository(directory: folder)
-        refreshKeys()
+        if readCredentials { refreshKeys() }
         voice.onFinished = { [weak self] in self?.finishVoice() }
         let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in Task { @MainActor in self?.tick() } }
         self.timer = timer; RunLoop.main.add(timer, forMode: .common)
@@ -164,15 +169,13 @@ final class MeetingModel: ObservableObject {
     func hover(_ inside: Bool) { presentation.hover(inside) }
     func collapse() { presentation.dismiss() }
     func showLibrary(_ destination: Destination = .home) {
-        self.destination = destination
-        openLibraryAction?()
-        collapse()
+        self.destination = destination; openLibraryAction?(); collapse()
     }
     func viewSession(_ id: UUID, segmentID: UUID? = nil) {
         selectedSessionID = id; selectedSegmentID = segmentID; showLibrary(.sessions)
     }
     func showCurrentSession() {
-        if let id = activeSessionID ?? answerSessionID ?? selectedSessionID ?? sessions.first?.id { viewSession(id) }
+        if let id = noticeSessionID ?? activeSessionID ?? answerSessionID ?? selectedSessionID ?? sessions.first?.id { viewSession(id) }
         else { showLibrary() }
     }
     private func tick() {
@@ -186,11 +189,11 @@ final class MeetingModel: ObservableObject {
         analyzeWhenReady()
     }
     func start() async {
-        guard !busyListening, !isLoadingSessions else { return }
+        guard !busyListening, !isLoadingSessions, !isShuttingDown else { return }
         guard hasConsent else { showLibrary(); error = "Confirm permission from the people being transcribed before starting."; return }
-        cancelAnswer(); cancelAnalysis()
+        cancelAnswer(); cancelAnalysis(); pendingQuestion = nil
         error = nil; needsRecordingPermission = false; intelligencePaused = false
-        isStarting = true; elapsed = "00:00"; notice = nil; answer = ""; answerComplete = false
+        isStarting = true; elapsed = "00:00"; notice = nil; noticeSessionID = nil; answer = ""; answerComplete = false
         let token = UUID(); sessionToken = token
         let session = ListeningSession()
         sessions.insert(session, at: 0); activeSessionID = session.id; selectedSessionID = session.id
@@ -203,8 +206,7 @@ final class MeetingModel: ObservableObject {
         }
         input.onFailure = { [weak self] message in
             guard let self, self.sessionToken == token else { return }
-            self.error = message
-            self.addNote("Capture issue: " + message, sessionID: session.id)
+            self.error = message; self.addNote("Capture issue: " + message, sessionID: session.id)
             Task { await self.stop() }
         }
         input.onLevel = { [weak self] level in
@@ -213,11 +215,9 @@ final class MeetingModel: ObservableObject {
         }
         do {
             let (configuration, key) = try transcriptionConnection()
-            actualTranscription = configuration.provider
             try await input.start(options: settings, transcription: configuration, key: key)
             guard sessionToken == token, isStarting else { await input.cancel(); return }
-            isStarting = false; isListening = true; collapse()
-            scheduleSave(session.id)
+            isStarting = false; isListening = true; collapse(); scheduleSave(session.id)
         } catch {
             await input.cancel()
             guard sessionToken == token else { return }
@@ -230,7 +230,7 @@ final class MeetingModel: ObservableObject {
             let failure = error as NSError
             needsRecordingPermission = failure.domain == SCStreamErrorDomain && failure.code == SCStreamError.Code.userDeclined.rawValue
             self.error = needsRecordingPermission
-                ? "Allow Notch Meeting Assistant in Privacy & Security → Screen & System Audio Recording, then quit and reopen it. Microphone-only listening does not need screen recording access."
+                ? "Allow Notch in Privacy & Security → Screen & System Audio Recording, then quit and reopen it. Microphone-only listening does not need screen recording access."
                 : error.localizedDescription
             showLibrary()
         }
@@ -239,7 +239,7 @@ final class MeetingModel: ObservableObject {
         guard !isStopping, busyListening || capture != nil else { return }
         let id = activeSessionID
         isStopping = true; isListening = false; isStarting = false
-        cancelAnalysis(); cancelAnswer()
+        cancelAnalysis(); cancelAnswer(); pendingQuestion = nil
         let old = capture; capture = nil
         await old?.stop()
         sessionToken = UUID(); activeSessionID = nil; isStopping = false
@@ -248,18 +248,25 @@ final class MeetingModel: ObservableObject {
             sessions[i].endedAt = Date()
             pendingSaves[id]?.cancel(); pendingSaves[id] = nil
             await persist(id)
-            if settings.generateSummaries, !sessions[i].segments.isEmpty { generateSummary(id) }
+            if !isShuttingDown, settings.generateSummaries,
+               sessions.first(where: { $0.id == id })?.segments.isEmpty == false { generateSummary(id) }
         }
     }
-    func shutdown() async {
-        settings.generateSummaries = false
+    func shutdown() async -> Bool {
+        isShuttingDown = true
+        // Wait for a Stop already draining the final audio chunk; don't close a file halfway through it.
+        while isStopping { try? await Task.sleep(nanoseconds: 100_000_000) }
         await stop()
         cancelAnalysis(); cancelAnswer(); searchTask?.cancel(); memoryTask?.cancel()
         summaryTasks.values.forEach { $0.cancel() }; pendingSaves.values.forEach { $0.cancel() }
+        var saved = true
         for session in sessions where settings.saveSessions || persistedIDs.contains(session.id) {
-            do { try await repository.save(session) } catch { self.error = error.localizedDescription }
+            do { try await repository.save(session) }
+            catch { saved = false; self.error = "Could not save \(session.title): \(error.localizedDescription). Export this session before quitting." }
         }
-        timer?.invalidate()
+        if saved { timer?.invalidate() }
+        else { isShuttingDown = false; showLibrary(.sessions) }
+        return saved
     }
     private func scheduleSave(_ id: UUID) {
         guard settings.saveSessions || persistedIDs.contains(id) else { return }
@@ -269,26 +276,30 @@ final class MeetingModel: ObservableObject {
             await self?.persist(id)
         }
     }
-    private func persist(_ id: UUID) async {
-        guard settings.saveSessions || persistedIDs.contains(id), let session = sessions.first(where: { $0.id == id }) else { return }
-        do { try await repository.save(session); persistedIDs.insert(id) }
-        catch { self.error = "Could not save this session: \(error.localizedDescription). Keep the app open and export the transcript." }
+    @discardableResult private func persist(_ id: UUID) async -> Bool {
+        guard settings.saveSessions || persistedIDs.contains(id), let session = sessions.first(where: { $0.id == id }) else { return true }
+        do { try await repository.save(session); persistedIDs.insert(id); return true }
+        catch { self.error = "Could not save this session: \(error.localizedDescription). Keep the app open and export the transcript."; return false }
     }
     func deleteSession(_ id: UUID) async {
         guard id != activeSessionID else { error = "Stop listening before deleting this session."; return }
         summaryTasks[id]?.cancel(); summaryTasks[id] = nil; summarizing.remove(id)
         pendingSaves[id]?.cancel(); pendingSaves[id] = nil
+        searchTask?.cancel(); searchToken = UUID(); isSearching = false
+        memoryTask?.cancel(); memoryToken = UUID(); isAskingMemory = false
+        if answerSessionID == id { cancelAnswer(); answer = ""; answerSessionID = nil }
+        if noticeSessionID == id { notice = nil; noticeSessionID = nil }
+        if pendingQuestion?.sessionID == id { pendingQuestion = nil }
         do {
             try await repository.delete(id)
             sessions.removeAll { $0.id == id }; persistedIDs.remove(id)
-            searchResults.removeAll { $0.sessionID == id }; memorySources.removeAll { $0.sessionID == id }; memoryAnswer = ""
+            searchResults.removeAll { $0.sessionID == id }; memorySources = []; memoryAnswer = ""
             if selectedSessionID == id { selectedSessionID = nil }
         } catch { self.error = error.localizedDescription }
     }
     func exportSession(_ id: UUID) {
         guard let session = sessions.first(where: { $0.id == id }) else { return }
-        let panel = NSSavePanel(); panel.nameFieldStringValue = "Notch session.md"
-        panel.allowedContentTypes = [.plainText]
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "Notch session.md"; panel.allowedContentTypes = [.plainText]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do { try session.markdown.write(to: url, atomically: true, encoding: .utf8) }
         catch { self.error = "Could not export: \(error.localizedDescription)" }
@@ -314,10 +325,9 @@ final class MeetingModel: ObservableObject {
         sessions[i].notes.append(SessionNote(text: String(text.prefix(20_000)), segmentID: segmentID)); scheduleSave(id)
     }
     func saveNotice() {
-        guard let notice, let id = answerSessionID ?? activeSessionID,
+        guard let notice, let id = noticeSessionID,
               let i = sessions.firstIndex(where: { $0.id == id }), let j = sessions[i].questions.firstIndex(where: { $0.id == notice.id }) else { return }
-        sessions[i].questions[j].saved = true
-        self.notice = sessions[i].questions[j]
+        sessions[i].questions[j].saved = true; self.notice = sessions[i].questions[j]
         if let k = sessions[i].segments.firstIndex(where: { $0.id == notice.segmentID }) { sessions[i].segments[k].bookmarked = true }
         scheduleSave(id)
     }
@@ -335,8 +345,7 @@ final class MeetingModel: ObservableObject {
               now.timeIntervalSince(lastSpeechAt) >= settings.autoDelay || now.timeIntervalSince(lastAnalysisAt) >= 10 else { return }
         let changed = session.segments.filter { analyzedText[$0.id] != $0.text }
         guard !changed.isEmpty else { return }
-        let segments = Array(changed.prefix(10))
-        lastAnalysisAt = now
+        let segments = Array(changed.prefix(10)); lastAnalysisAt = now
         let token = UUID(); analysisToken = token
         analysisTask = Task { [weak self] in
             guard let self else { return }
@@ -360,15 +369,8 @@ final class MeetingModel: ObservableObject {
                 }
                 self.analysisTask = nil; self.scheduleSave(session.id)
                 if let newest, self.settings.questionAssistance != .off {
-                    self.notice = newest; self.answerSessionID = session.id
-                    self.presentation.beginAnswer(); self.presentation.reveal(duration: 10)
-                    if !self.isAnswering {
-                        self.answer = ""; self.answerComplete = false
-                        if self.settings.questionAssistance == .suggest || self.settings.questionAssistance == .automatic {
-                            self.requestAnswer(text: newest.text, sessionID: session.id, questionID: newest.id, automatic: true,
-                                               suggestion: self.settings.questionAssistance == .suggest)
-                        }
-                    }
+                    if self.isAnswering || self.isSpeaking { self.pendingQuestion = (session.id, newest) }
+                    else { self.presentQuestion(newest, sessionID: session.id) }
                 }
             } catch {
                 guard self.analysisToken == token, !(error is CancellationError) else { return }
@@ -377,13 +379,24 @@ final class MeetingModel: ObservableObject {
             }
         }
     }
-    func resumeIntelligence() { intelligencePaused = false; error = nil; lastAnalysisAt = .distantPast }
-    private func cancelAnalysis() {
-        analysisToken = UUID(); analysisTask?.cancel(); analysisTask = nil
+    func presentQuestion(_ question: SessionQuestion, sessionID: UUID) {
+        guard settings.questionAssistance != .off, sessions.contains(where: { $0.id == sessionID }) else { return }
+        notice = question; noticeSessionID = sessionID; answer = ""; answerComplete = false
+        presentation.beginAnswer(); presentation.reveal(duration: 10)
+        if settings.questionAssistance == .suggest || settings.questionAssistance == .automatic {
+            requestAnswer(text: question.text, sessionID: sessionID, questionID: question.id, automatic: true, suggestion: settings.questionAssistance == .suggest)
+        }
     }
+    private func presentPendingQuestion() {
+        guard !isAnswering, !isSpeaking, let pendingQuestion else { return }
+        self.pendingQuestion = nil
+        if activeSessionID == pendingQuestion.sessionID { presentQuestion(pendingQuestion.question, sessionID: pendingQuestion.sessionID) }
+    }
+    func resumeIntelligence() { intelligencePaused = false; error = nil; lastAnalysisAt = .distantPast }
+    private func cancelAnalysis() { analysisToken = UUID(); analysisTask?.cancel(); analysisTask = nil }
     func requestAnswer(text: String? = nil, sessionID: UUID? = nil, questionID: UUID? = nil,
                        task: AITask = .liveQuestion, automatic: Bool = false, suggestion: Bool = false) {
-        guard !isStarting, !isStopping else { return }
+        guard !isStarting, !isStopping, !isShuttingDown else { return }
         let requested = (text ?? question).trimmingCharacters(in: .whitespacesAndNewlines)
         let id = sessionID ?? (requested.isEmpty ? (activeSessionID ?? selectedSessionID) : (selectedSessionID ?? activeSessionID))
         let snapshot = sessions.first { $0.id == id }
@@ -394,23 +407,26 @@ final class MeetingModel: ObservableObject {
         catch { self.error = error.localizedDescription; if !automatic { showLibrary(.settings) }; return }
         cancelAnswer()
         let token = UUID(); responseToken = token
-        automaticAnswer = automatic; isAnswering = true; answerComplete = false; answer = ""; answerSessionID = id; error = nil
+        isAnswering = true; answerComplete = false; answer = ""; answerSessionID = id; error = nil
         if !automatic { question = "" }
         presentation.beginAnswer()
         if automatic || destination != .sessions { presentation.reveal(duration: 30) }
         let questionToUpdate = questionID ?? (requested.isEmpty ? notice?.id : nil)
+        answerQuestionID = questionToUpdate
+        if !automatic, questionToUpdate == nil { notice = nil; noticeSessionID = nil }
+        let background = String(settings.backgroundContext.prefix(4000))
         answerTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let context = try await snapshot.mapAsync { try await self.memoryIndex.context(for: promptQuestion, session: $0) } ?? "No captured session context is available."
+                let context: String
+                if let snapshot { context = try await self.memoryIndex.context(for: promptQuestion, session: snapshot) }
+                else { context = "No captured session context is available." }
                 let instruction = SessionIntelligence.grounding + (suggestion
                     ? "\nGive one short suggested answer, at most two sentences. Do not claim the speaker said your suggestion."
                     : "\nAnswer the user's question using relevant context. Be concise for a live question, and give more detail only when the question asks for it. A reference such as 'this curve' may be ambiguous; explain the assumption or say what information is missing.")
                 try await ProviderClient().stream(connection: provider, system: instruction,
-                    prompt: "Background notes:\n\(String(self.settings.backgroundContext.prefix(4000)))\n\nRelevant session context:\n\(context)\n\nUser question:\n\(String(promptQuestion.prefix(8000)))",
-                    maxTokens: task == .deepAnalysis ? 4096 : 2048) { [weak self] delta in
-                        await self?.receiveAnswer(delta, token: token)
-                    }
+                    prompt: "Background notes:\n\(background)\n\nRelevant session context:\n\(context)\n\nUser question:\n\(String(promptQuestion.prefix(8000)))",
+                    maxTokens: task == .deepAnalysis ? 4096 : 2048) { [weak self] delta in await self?.receiveAnswer(delta, token: token) }
                 guard self.responseToken == token, !Task.isCancelled else { return }
                 self.isAnswering = false; self.answerComplete = true; self.answerTask = nil
                 if let id, let i = self.sessions.firstIndex(where: { $0.id == id }) {
@@ -422,6 +438,7 @@ final class MeetingModel: ObservableObject {
                 }
                 self.presentation.reveal(duration: 9)
                 if !suggestion, self.settings.outputMode.usesVoice { self.readAnswer() }
+                else { self.presentPendingQuestion() }
             } catch {
                 guard self.responseToken == token else { return }
                 self.isAnswering = false; self.answerTask = nil
@@ -431,29 +448,29 @@ final class MeetingModel: ObservableObject {
             }
         }
     }
-    private func receiveAnswer(_ delta: String, token: UUID) {
-        guard responseToken == token else { return }
-        answer += delta
-    }
+    private func receiveAnswer(_ delta: String, token: UUID) { if responseToken == token { answer += delta } }
     func answerNotice() {
         guard let notice else { requestAnswer(); return }
-        requestAnswer(text: notice.text, sessionID: answerSessionID ?? activeSessionID, questionID: notice.id)
+        requestAnswer(text: notice.text, sessionID: noticeSessionID, questionID: notice.id)
     }
     func cancelAnswer() {
-        responseToken = UUID(); answerTask?.cancel(); answerTask = nil; isAnswering = false; automaticAnswer = false; stopVoice()
+        responseToken = UUID(); answerTask?.cancel(); answerTask = nil; isAnswering = false
+        voice.stop(); isSpeaking = false
+        if isListening { capture?.setSuppressed(false) }
     }
     func readAnswer() {
         guard answerComplete, !answer.isEmpty else { return }
-        stopVoice(); capture?.setSuppressed(true); isSpeaking = true
+        voice.stop(); capture?.setSuppressed(true); isSpeaking = true
         voice.speak(answer, language: settings.locale, rate: settings.voiceRate)
     }
     func stopVoice() { voice.stop(); finishVoice() }
     private func finishVoice() {
         guard isSpeaking else { return }; isSpeaking = false
         if isListening { capture?.setSuppressed(false) }
+        presentPendingQuestion()
     }
     func generateSummary(_ id: UUID) {
-        guard !summarizing.contains(id), id != activeSessionID, let snapshot = sessions.first(where: { $0.id == id }), !snapshot.segments.isEmpty else { return }
+        guard !isShuttingDown, !summarizing.contains(id), id != activeSessionID, let snapshot = sessions.first(where: { $0.id == id }), !snapshot.segments.isEmpty else { return }
         let connection: ProviderConnection
         do { connection = try self.connection(.summary) }
         catch {
@@ -481,8 +498,7 @@ final class MeetingModel: ObservableObject {
     }
     func search() {
         searchTask?.cancel(); searchToken = UUID(); let token = searchToken
-        let query = searchQuery; let snapshot = sessions
-        isSearching = true
+        let query = searchQuery; let snapshot = sessions; isSearching = true
         searchTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -513,9 +529,7 @@ final class MeetingModel: ObservableObject {
                 let provider = try self.connection(.memory)
                 let evidence = hits.enumerated().map { "[\($0.offset + 1)] \($0.element.sessionTitle) · \($0.element.time.formatted())\n\(String($0.element.text.prefix(2400)))" }.joined(separator: "\n\n")
                 try await ProviderClient().stream(connection: provider, system: SessionIntelligence.grounding + "\nAnswer only from the retrieved session excerpts. Cite supporting excerpt numbers as [1], [2], etc. Say when the stored sessions do not establish the answer. Do not claim a list is exhaustive; these are selected search results. Relative dates must remain relative to the source session date unless the calendar date is certain.",
-                    prompt: "Today: \(Date().formatted())\nQuestion: \(query)\n\nRetrieved excerpts:\n\(evidence)", maxTokens: 4096) { [weak self] delta in
-                        await self?.receiveMemory(delta, token: token)
-                    }
+                    prompt: "Today: \(Date().formatted())\nQuestion: \(query)\n\nRetrieved excerpts:\n\(evidence)", maxTokens: 4096) { [weak self] delta in await self?.receiveMemory(delta, token: token) }
             } catch {
                 guard self.memoryToken == token, !(error is CancellationError) else { return }
                 self.error = error.localizedDescription
@@ -543,7 +557,8 @@ final class MeetingModel: ObservableObject {
         } catch { providerStatus = error.localizedDescription }
     }
     func removeProviderKey() {
-        cancelAnalysis(); cancelAnswer(); memoryTask?.cancel()
+        guard !busyListening else { return }
+        cancelAnalysis(); cancelAnswer(); memoryTask?.cancel(); pendingQuestion = nil
         summaryTasks.values.forEach { $0.cancel() }
         do {
             try APIKeyStore.remove(account: APIKeyStore.account(selectedProvider)); keys.removeValue(forKey: selectedProvider); keyedProviders.remove(selectedProvider)
@@ -554,18 +569,18 @@ final class MeetingModel: ObservableObject {
     func refreshModels() async {
         guard !providerBusy, let config = settings.providers.first(where: { $0.provider == selectedProvider }) else { return }
         providerBusy = true; providerStatus = "Checking connection…"
-        let provider = selectedProvider
+        let provider = selectedProvider; let originalKey = keys[provider] ?? ""
         defer { providerBusy = false }
         do {
-            let models = try await ProviderClient().getModels(configuration: config, key: keys[provider] ?? "")
-            guard let i = settings.providers.firstIndex(where: { $0.provider == provider }) else { return }
+            let models = try await ProviderClient().getModels(configuration: config, key: originalKey)
+            guard let i = settings.providers.firstIndex(where: { $0.provider == provider }),
+                  (keys[provider] ?? "") == originalKey, settings.providers[i].baseURL == config.baseURL else { return }
             settings.providers[i].models = models; settings.providers[i].verifiedAt = Date()
             if selectedProvider == provider { providerStatus = "Connection verified. Choose a model below." }
         } catch { if selectedProvider == provider { providerStatus = error.localizedDescription } }
     }
     func transcriptionConnection() throws -> (TranscriptionConfiguration, String) {
-        var config = settings.transcription
-        if config.provider == .automatic { config.provider = keyedProviders.contains(.groq) ? .groq : .apple }
+        var config = settings.transcription; config.provider = resolvedTranscriptionService
         if settings.onDeviceOnly && config.provider != .apple && config.provider != .localWhisper { throw AssistantError("On-device only is enabled. Choose Apple Speech or Local Whisper, or turn off on-device only before using a cloud transcription provider.") }
         switch config.provider {
         case .groq, .openai:
@@ -577,6 +592,7 @@ final class MeetingModel: ObservableObject {
         }
     }
     func saveTranscriptionKey() {
+        guard !busyListening else { return }
         do { try APIKeyStore.save(transcriptionKeyDraft, account: "custom-transcription-api-key"); transcriptionKeyDraft = ""; hasCustomTranscriptionKey = true; transcriptionStatus = "Saved in Keychain." }
         catch { transcriptionStatus = error.localizedDescription }
     }
@@ -590,8 +606,10 @@ final class MeetingModel: ObservableObject {
             let (config, key) = try transcriptionConnection()
             if config.provider == .apple { transcriptionStatus = "Apple Speech uses the selected language on this Mac."; return }
             transcriptionStatus = "Checking transcription provider…"
-            try await WhisperTranscriptionProvider().validateApiKey(configuration: config, key: key)
-            transcriptionModels = try await WhisperTranscriptionProvider().getModels(configuration: config, key: key)
+            if config.provider == .localWhisper { try await WhisperTranscriptionProvider().validateApiKey(configuration: config, key: key) }
+            let models = try await WhisperTranscriptionProvider().getModels(configuration: config, key: key)
+            guard config.provider == resolvedTranscriptionService else { return }
+            transcriptionModels = models
             transcriptionStatus = config.provider == .localWhisper ? "Local Whisper server responded. Its loaded model is managed by the server." : "Connection verified. Select a transcription model."
         } catch { transcriptionStatus = error.localizedDescription }
     }
@@ -603,12 +621,5 @@ final class MeetingModel: ObservableObject {
     }
     func openRecordingSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(needsRecordingPermission ? "Privacy_ScreenCapture" : "Privacy_Microphone")") { NSWorkspace.shared.open(url) }
-    }
-}
-
-private extension Optional {
-    func mapAsync<T>(_ transform: (Wrapped) async throws -> T) async rethrows -> T? {
-        guard let value = self else { return nil }
-        return try await transform(value)
     }
 }
