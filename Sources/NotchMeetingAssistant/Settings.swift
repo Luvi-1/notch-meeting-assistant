@@ -61,7 +61,7 @@ enum APIKeyStore {
     }
 
     static func save(_ value: String) throws {
-        let data = Data(value.utf8)
+        let data = Data(try AnswerClient.validatedKey(value).utf8)
         var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if status == errSecItemNotFound {
             var item = query

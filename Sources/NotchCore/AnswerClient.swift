@@ -4,6 +4,16 @@ public struct AnswerClient {
     public static let astraModel = "gpt-6-astra"
     public init() {}
 
+    public static func validatedKey(_ value: String) throws -> String {
+        let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Check scalars: Swift treats CRLF as one Character, so contains("\n") can miss it.
+        guard !key.isEmpty, key.utf8.count <= 4_096,
+              key.unicodeScalars.allSatisfy({ (33...126).contains($0.value) }) else {
+            throw AssistantError("Enter a valid OpenAI API key without spaces or line breaks.")
+        }
+        return key
+    }
+
     // A shared ephemeral session reuses TLS connections without persisting meeting data.
     private static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -15,10 +25,7 @@ public struct AnswerClient {
 
     func makeRequest(key: String, model: String, ultrafast: Bool, transcript: String,
                      latest: String, context: String, question: String, automatic: Bool) throws -> URLRequest {
-        let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty, !key.contains("\n"), !key.contains("\r") else {
-            throw AssistantError("Add a valid OpenAI API key in Settings.")
-        }
+        let key = try Self.validatedKey(key)
         let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty, model.count <= 120,
               model.range(of: "^[A-Za-z0-9._:-]+$", options: .regularExpression) != nil else {
