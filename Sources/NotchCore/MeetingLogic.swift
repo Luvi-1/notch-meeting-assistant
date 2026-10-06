@@ -123,9 +123,24 @@ public struct EventStreamDecoder {
             if payload == "[DONE]" { return StreamEvent(done: true) }
             let chunk = try JSONDecoder().decode(Chunk.self, from: Data(payload.utf8))
             if let error = chunk.error { throw AssistantError(String(error.message.prefix(300))) }
-            guard let choice = chunk.choices?.first else { return StreamEvent() }
-            return StreamEvent(text: choice.delta.content ?? choice.delta.refusal ?? "",
-                               finishReason: choice.finish_reason)
+            switch chunk.type {
+            case "response.output_text.delta", "response.refusal.delta":
+                return StreamEvent(text: chunk.delta ?? "")
+            case "response.completed":
+                guard chunk.response?.status == "completed" else {
+                    throw AssistantError("The provider returned an incomplete answer.")
+                }
+                return StreamEvent(done: true, finishReason: "stop")
+            case "response.failed", "response.incomplete", "error":
+                let detail = chunk.response?.error?.message ?? chunk.message
+                    ?? "The answer ended early. Retry manually or shorten the question."
+                throw AssistantError(String(detail.prefix(300)))
+            default:
+                // Retain the previous framing format for stored fixtures and older stream checks.
+                guard let choice = chunk.choices?.first else { return StreamEvent() }
+                return StreamEvent(text: choice.delta.content ?? choice.delta.refusal ?? "",
+                                   finishReason: choice.finish_reason)
+            }
         }
         if line.hasPrefix("data:") {
             var data = String(line.dropFirst(5))
@@ -140,9 +155,14 @@ public struct EventStreamDecoder {
     }
 
     private struct Chunk: Decodable {
+        let type: String?
+        let delta: String?
+        let response: Response?
+        let message: String?
         let choices: [Choice]?
         let error: APIError?
     }
+    private struct Response: Decodable { let status: String?; let error: APIError? }
     private struct APIError: Decodable { let message: String }
     private struct Choice: Decodable { let delta: Delta; let finish_reason: String? }
     private struct Delta: Decodable { let content: String?; let refusal: String? }

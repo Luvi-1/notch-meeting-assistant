@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import ScreenCaptureKit
 import NotchCore
 
 @MainActor
@@ -12,14 +13,25 @@ final class MeetingModel: ObservableObject {
             if oldValue.outputMode != settings.outputMode, !settings.outputMode.usesVoice { stopVoice() }
         }
     }
-    @Published var expanded = true
-    @Published var showSettings = false
+    @Published private(set) var presentation = NotchPresentation()
+    @Published var showSettings = false {
+        didSet { presentation.setSettings(showSettings) }
+    }
     @Published var hasConsent = false
     @Published var question = ""
     @Published var meetingContext = ""
     @Published var keyDraft = ""
     @Published var keyStatus = ""
-    @Published var error: String?
+    @Published private(set) var needsRecordingPermission = false
+    @Published var error: String? {
+        didSet {
+            if error == nil { needsRecordingPermission = false }
+            else {
+                presentation.beginAnswer()
+                presentation.reveal(duration: 12)
+            }
+        }
+    }
     @Published var applications: [MeetingApplication] = []
     @Published var loadingApplications = false
     @Published private(set) var transcript = TranscriptStore()
@@ -31,9 +43,10 @@ final class MeetingModel: ObservableObject {
     @Published private(set) var isSpeaking = false
     @Published private(set) var hasKey = false
     @Published var cutoutWidth: CGFloat = 185
-    @Published var cutoutHeight: CGFloat = 32
-    @Published var panelWidth: CGFloat = 620
-    @Published var panelHeight: CGFloat = 620
+    @Published var cutoutHeight: CGFloat = 34
+    @Published var panelWidth: CGFloat = 277
+    @Published var panelHeight: CGFloat = 34
+    @Published var detachedNotch = false
 
     private var apiKey = ""
     private var capture: MeetingCapture?
@@ -47,6 +60,7 @@ final class MeetingModel: ObservableObject {
     private var answeringAutomatically = false
     private var rawAnswer = ""
 
+    var expanded: Bool { presentation.phase == .expanded }
     var canAnswer: Bool {
         !isStarting && !isAnswering && (!transcript.lines.isEmpty || !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
@@ -56,7 +70,15 @@ final class MeetingModel: ObservableObject {
         if isSpeaking { return isListening ? "Speaking · transcription paused" : "Speaking" }
         if isAnswering { return isListening ? "Listening · answering" : "Answering" }
         if isListening { return hasKey ? "Listening" : "Listening · add API key" }
+        if error != nil { return needsRecordingPermission ? "Recording access needed" : "Needs attention" }
         return "Ready"
+    }
+
+    var providerLabel: String {
+        if settings.model == AnswerClient.astraModel {
+            return settings.ultrafast == true ? "Astra · Ultrafast" : "Astra"
+        }
+        return settings.model
     }
 
     init() {
@@ -66,17 +88,32 @@ final class MeetingModel: ObservableObject {
             hasKey = !apiKey.isEmpty
         } catch { self.error = error.localizedDescription }
         voice.onFinished = { [weak self] in self?.finishVoice() }
-        let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.automaticTick() }
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
         }
         autoTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    func openNotch() { presentation.open() }
+    func hover(_ inside: Bool) { presentation.hover(inside) }
+    func setEditing(_ editing: Bool) { presentation.setEditing(editing) }
+    func togglePin() { presentation.setPinned(!presentation.pinned) }
+    func collapse() {
+        showSettings = false
+        presentation.dismiss()
+    }
+
+    private func tick() {
+        var next = presentation
+        next.tick()
+        if next != presentation { presentation = next }
+        automaticTick()
+    }
+
     func start() async {
         guard !isStarting, !isListening else { return }
         guard hasConsent else {
-            expanded = true
             error = "Confirm that everyone agrees to transcription before starting."
             return
         }
@@ -115,7 +152,7 @@ final class MeetingModel: ObservableObject {
             await input.stop()
             if sessionID == token {
                 capture = nil
-                self.error = "Could not start: \(error.localizedDescription)"
+                reportCaptureError(error, prefix: "Could not start")
             }
         }
     }
@@ -174,7 +211,21 @@ final class MeetingModel: ObservableObject {
         loadingApplications = true
         defer { loadingApplications = false }
         do { applications = try await MeetingCapture.applications() }
-        catch { self.error = "Could not list apps: \(error.localizedDescription). Allow Screen & System Audio Recording in System Settings." }
+        catch { reportCaptureError(error, prefix: "Could not list apps") }
+    }
+
+    private func reportCaptureError(_ underlying: Error, prefix: String) {
+        let failure = underlying as NSError
+        needsRecordingPermission = failure.domain == SCStreamErrorDomain
+            && failure.code == SCStreamError.Code.userDeclined.rawValue
+        if needsRecordingPermission {
+            error = "Allow Notch Meeting Assistant in Privacy & Security → Screen & System Audio Recording. Then quit and reopen the app."
+        } else { error = "\(prefix): \(underlying.localizedDescription)" }
+    }
+
+    func openRecordingSettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+        NSWorkspace.shared.open(url)
     }
 
     private var newSpeech: String {
@@ -197,7 +248,6 @@ final class MeetingModel: ObservableObject {
     func requestAnswer(automatic: Bool = false) {
         guard canAnswer else { return }
         guard hasKey else {
-            expanded = true
             showSettings = true
             error = "Save an OpenAI API key to generate answers."
             return
@@ -208,8 +258,13 @@ final class MeetingModel: ObservableObject {
         let context = meetingContext
         let question = automatic ? "" : self.question
         let modelID = settings.model
+        let ultrafast = settings.ultrafast == true
         let key = apiKey
-        if !automatic { self.question = "" }
+        if !automatic {
+            self.question = ""
+            presentation.open()
+        }
+        presentation.beginAnswer()
         sentText = Dictionary(uniqueKeysWithValues: transcript.lines.map { ($0.id, $0.text) })
         gate.consume(gate.revision)
         answerTask?.cancel()
@@ -223,8 +278,9 @@ final class MeetingModel: ObservableObject {
         error = nil
         answerTask = Task { [weak self] in
             do {
-                try await AnswerClient().stream(key: key, model: modelID, transcript: transcriptSnapshot,
-                                                latest: latest, context: context, question: question,
+                try await AnswerClient().stream(key: key, model: modelID, ultrafast: ultrafast,
+                                                transcript: transcriptSnapshot, latest: latest,
+                                                context: context, question: question,
                                                 automatic: automatic) { [weak self] delta in
                     await self?.receive(delta, id: id, automatic: automatic)
                 }
@@ -239,7 +295,7 @@ final class MeetingModel: ObservableObject {
                 }
                 self.answer = result
                 self.answerComplete = true
-                self.expanded = true
+                self.presentation.reveal(duration: 8)
                 if self.settings.outputMode.usesVoice { self.readAnswer() }
             } catch {
                 guard let self, self.responseID == id else { return }
@@ -248,7 +304,7 @@ final class MeetingModel: ObservableObject {
                 self.answerTask = nil
                 if error is CancellationError { return }
                 self.error = error.localizedDescription
-                // An API error must not cause a paid automatic retry loop.
+                // An API error must not cause a paid automatic retry loop or a silent tier fallback.
                 if automatic { self.settings.answerMode = .manual }
             }
         }
@@ -258,8 +314,10 @@ final class MeetingModel: ObservableObject {
         guard responseID == id, !Task.isCancelled else { return }
         rawAnswer += delta
         if !automatic || !"[NO_ANSWER]".hasPrefix(rawAnswer.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            let firstText = answer.isEmpty
             answer = rawAnswer
-            expanded = true
+            // Open once, never on every token. Explicit dismissal is respected until the next answer.
+            if firstText { presentation.reveal(duration: 30) }
         }
     }
 

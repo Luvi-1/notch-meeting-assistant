@@ -10,8 +10,10 @@ struct MeetingApplication: Identifiable {
 struct UserSettings: Codable {
     var answerMode: AnswerMode = .automatic
     var outputMode: OutputMode = .text
-    var autoDelay = 1.8
-    var model = "gpt-4.1-mini"
+    var autoDelay = 1.2
+    var model = AnswerClient.astraModel
+    // Optional for backward-compatible decoding of preferences from the first build.
+    var ultrafast: Bool? = true
     var locale = "en-US"
     var includeMicrophone = false
     var onDeviceOnly = false
@@ -21,8 +23,14 @@ struct UserSettings: Codable {
     static func load() -> Self {
         guard let data = UserDefaults.standard.data(forKey: "preferences"),
               var value = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
-        value.autoDelay = value.autoDelay.isFinite ? min(4, max(0.7, value.autoDelay)) : 1.8
+        value.autoDelay = value.autoDelay.isFinite ? min(4, max(0.7, value.autoDelay)) : 1.2
         value.voiceRate = value.voiceRate.isFinite ? min(0.65, max(0.35, value.voiceRate)) : 0.48
+        if value.ultrafast == nil {
+            // Migrate the old shipped default once, preserving custom models and all audio preferences.
+            if value.model == "gpt-4.1-mini" { value.model = AnswerClient.astraModel }
+            value.ultrafast = value.model == AnswerClient.astraModel
+            value.save()
+        }
         return value
     }
 
